@@ -1,26 +1,15 @@
-/*  A virtual machine for ECS 150 with memory pools and FAT 32 functionality
+/*  A virtual machine for ECS 150 with memory pools and FAT functionality
     Filename: VirtualMachine.cpp
     Authors: John Garcia, Felix Ng
 
     In this version:
-    VMStart -                           not started
-    VMDateTime -                        not started
+    VMStart -                           starting
     VMDirectoryOpen -                   not started      
     VMDirectoryClose -                  not started
     VMDirectoryRead -                   not started
     VMDirectoryRewind -                 not started
     VMDirectoryCurrent -                not started
     VMDirectoryChange -                 not started
-    VMFileSystemValidPathName -         not started
-    VMFileSystemIsRelativePath -        not started
-    VMFileSystemIsAbsolutePath -        not started
-    VMFileSystemGetAbsolutePath -       not started
-    VMFileSystemPathIsOnMount -         not started
-    VMFileSystemDirectoryFromFullPath - not started
-    VMFileSystemFileFromFullPath -      not started
-    VMFileSystemConsolidatePath -       not started
-    VMFileSystemSimplifyPath -          not started
-    VMFileSystemRelativePath -          not started
     Threads Create/Delete - NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
 
     In order to remove all system V messages: 
