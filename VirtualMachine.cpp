@@ -10,7 +10,7 @@
     VMDirectoryRewind -                 not started
     VMDirectoryCurrent -                not started
     VMDirectoryChange -                 not started
-    Threads Create/Delete - NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
+    Threads Create/Delete -             NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
 
     In order to remove all system V messages: 
     1. ipcs //to see msg queue
@@ -24,8 +24,10 @@
 #include "Machine.h"
 #include <vector>
 #include <queue>
+#include <fcntl.h>
+#include <string.h>
+#include <stdio.h>
 #include <iostream>
-#include <cstring>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
 
@@ -63,7 +65,6 @@ class MPB
     public:
     TVMMemorySize MPsize; //size of memory pool
     TVMMemoryPoolID MPid; //memory pool id
-    TVMMemorySizeRef MPsizeRef;
     void *base; //pointer for base of stack
     uint8_t *spaceMap; //keep track of sizes and allocated spaces
 }; //clas MPB - Memory Pool Block
@@ -306,6 +307,124 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
+int main(int argc, char *argv[])
+{
+    //Given defaults
+    int TicksMS = 100;
+    int machineTicks = 100;
+    TVMMemorySize heapSize = 0x1000000; //16 MiB
+    TVMMemorySize sharedSize = 0x4000; //16 KiB
+    char *fatMount = "fat.ima";
+
+    int i = 1;
+    while(i < argc)
+    {
+        if(strcmp(argv[i], "-t") == 0)
+        {
+            i++;
+            if(i >= argc)
+                break;
+
+            if(sscanf(argv[i], "%d", &TicksMS) != 1) //read and make sure we read ticks if any in arg
+            {
+                fprintf(stderr, "Invalid parameter for -t of \"%s\".\n", argv[i]);
+                return 1;
+            }
+
+            if(TicksMS <= 0) //make sure ticks are positive and not zero
+            {
+                fprintf(stderr, "Invalid parameter for -t. It must be positive.\n"); 
+                return 1;
+            }
+        } //-t
+
+        else if(strcmp(argv[i], "-m") == 0)
+        {
+            i++;
+            if(i >= argc)
+                break;
+
+            if(sscanf(argv[i], "%d", &machineTicks) != 1) //ensures we read the machine ticks if any in arg
+            {
+                fprintf(stderr, "Invalid parameter for -m of \"%s\".\n", argv[i]);    
+                return 1;
+            }
+
+            if(machineTicks <= 0) //make sure machine ticks are positive and not zero
+            {
+                fprintf(stderr, "Invalid parameter for -m. It must be positive.\n");    
+                return 1;
+            }
+        } //-m
+
+        else if(strcmp(argv[i], "-h") == 0)
+        {
+            i++;
+            if(i >= argc)
+                break;
+
+            if(sscanf(argv[i], "%u", &heapSize) != 1) //ensures we read the heap size if any in arg
+            {
+                fprintf(stderr, "Invalid parameter for -h of \"%s\".\n", argv[i]);    
+                return 1;
+            }
+
+            if(heapSize <= 0) //make sure heap size is positive and not zero
+            {
+                fprintf(stderr, "Invalid parameter for -h. It must be positive.\n");    
+                return 1;
+            }
+        } //-h
+
+        else if(strcmp(argv[i], "-s") == 0)
+        {
+            i++;
+            if(i >= argc)
+                break;
+
+            if(sscanf(argv[i], "%u", &sharedSize) != 1) //ensures we read the shared size if any in arg
+            {
+                fprintf(stderr, "Invalid parameter for -s of \"%s\".\n", argv[i]);    
+                return 1;
+            }
+
+            if(sharedSize <= 0) //make sure shared size is positive and not zero
+            {
+                fprintf(stderr, "Invalid parameter for -s. It must be positive.\n");    
+                return 1;
+            }
+        } //-s
+
+        else if(strcmp(argv[i], "-f") == 0)
+        {
+            i++;
+            if(i >= argc)
+                break;
+            fatMount = argv[i]; //we got the fat file now
+        } //-f
+
+        else //nothing else after first arg so get out
+            break;
+    } //go through the arguments, read, and start
+
+    if(i >= argc) //check to see if we went over
+    {
+        fprintf(stderr,"Syntax Error!\n");    
+        return 1;
+    }
+
+    if(VMStart(TicksMS, heapSize, machineTicks, sharedSize, fatMount, argc - i, argv + i) != VM_STATUS_SUCCESS)
+    {
+        fprintf(stderr, "Virtual Machine failed to start! Oh my.\n");    
+        return 1;
+    }
+    return 0;
+} //main()
+
+//***************************************************************************//
+//The Virtual Machine Starter!
+//***************************************************************************//
+
 TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms, 
     TVMMemorySize sharedsize, const char *mount, int argc, char *argv[])
 {
@@ -315,8 +434,13 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     MachineRequestAlarm(usec, (TMachineAlarmCallback)AlarmCallBack, NULL); //starts the alarm tick
     MachineEnableSignals(); //start the signals
 
-    if(VMMain == NULL) //fail to load module
-        return 0;
+    //Read First Sector
+    //uint8_t* fileImageData;
+    //MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
+    //MachineFileRead(currentThread->fileResult, fileImageData, 512, FileCallback, currentThread);
+
+    if(VMMain == NULL) //fail to load module check
+        return VM_STATUS_FAILURE;
 
     else //load successful
     {
@@ -360,6 +484,32 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     }
 } //VMStart()
 
+//***************************************************************************//
+//Directory Functions
+//***************************************************************************//
+
+TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
+{return 0;} //VMDirectoryOpen()
+
+TVMStatus VMDirectoryClose(int dirdescriptor)
+{return 0;} //VMDirectoryClose()
+
+TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
+{return 0;} //VMDirectoryRead()
+
+TVMStatus VMDirectoryRewind(int dirdescriptor)
+{return 0;} //VMDirectoryRewind()
+
+TVMStatus VMDirectoryCurrent(char *abspath)
+{return 0;} //VMDirectoryCurrent()
+
+TVMStatus VMDirectoryChange(const char *path)
+{return 0;} //VMDirectoryChange()
+
+//***************************************************************************//
+//MemoryPool Functions
+//***************************************************************************//
+
 TVMStatus VMMemoryPoolCreate(void *base, TVMMemorySize size, TVMMemoryPoolIDRef memory)
 {
     TMachineSignalState OldState; //local variable to suspend
@@ -369,8 +519,8 @@ TVMStatus VMMemoryPoolCreate(void *base, TVMMemorySize size, TVMMemoryPoolIDRef 
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
     uint32_t curr = 0;
-    uint32_t slots = size/64  + (size % 64 > 0);
-    MPB *myMemPool = findMemoryPool(VM_MEMORY_POOL_ID_SYSTEM);
+    uint32_t slots = size/64  + (size % 64 > 0); //to know the amount of slots we need
+    MPB *myMemPool = findMemoryPool(VM_MEMORY_POOL_ID_SYSTEM); //this is the main mem pool, head honcho
 
     for(int i = 0; i < myMemPool->MPsize/64 ; i++)
     {
@@ -395,7 +545,7 @@ TVMStatus VMMemoryPoolCreate(void *base, TVMMemorySize size, TVMMemoryPoolIDRef 
     newMemPool->base = (uint8_t*)myMemPool->base + curr; // base gets mainMemPool base + offset
     newMemPool->MPid = *memory = memPoolList.size(); //gets next size in list val
     newMemPool->MPsize = size;
-    newMemPool->spaceMap = new uint8_t[size / 64];
+    newMemPool->spaceMap = new uint8_t[size/64];
     memPoolList.push_back(newMemPool); //push it into the list of mem pools
 
     MachineResumeSignals(&OldState); //resume signals
@@ -464,8 +614,8 @@ TVMStatus VMMemoryPoolAllocate(TVMMemoryPoolID memory, TVMMemorySize size, void 
     if(myMemPool == NULL || size == 0 || pointer == NULL) 
         return VM_STATUS_ERROR_INVALID_PARAMETER; //mem does not exist
     
-    uint32_t slots = size/64  + (size % 64 > 0);
-    uint32_t curr = 0;    
+    uint32_t slots = size/64 + (size % 64 > 0); //number of slots to allocate for
+    uint32_t curr = 0; //offset
 
     for(uint32_t i = 0; i < (myMemPool->MPsize/64); i++)
     {
@@ -480,7 +630,7 @@ TVMStatus VMMemoryPoolAllocate(TVMMemoryPoolID memory, TVMMemorySize size, void 
                     curr = (i - j) * 64; //gives the position mapped to memory pool
                 }
 
-                *pointer = (uint8_t*)myMemPool->base + curr; //pointer now mapped to current from our map
+                *pointer = (uint8_t*)myMemPool->base + curr; //pointer now mapped to base plus offset
                 MachineResumeSignals(&OldState); //resume signals
                 return VM_STATUS_SUCCESS; //we allocated so we are done
             }
@@ -502,8 +652,9 @@ TVMStatus VMMemoryPoolDeallocate(TVMMemoryPoolID memory, void *pointer)
     if(myMemPool == NULL || pointer == NULL) 
         return VM_STATUS_ERROR_INVALID_PARAMETER; //mem does not exist
 
-    uint32_t offset = *(uint8_t*)&pointer - *(uint8_t*)&myMemPool->base;
-    uint32_t slots = myMemPool->spaceMap[offset/64];
+    //compare the ptr to base of mem pool
+    uint32_t offset = *(uint8_t*)&pointer - *(uint8_t*)&myMemPool->base; //allocated part begins here
+    uint32_t slots = myMemPool->spaceMap[offset/64]; //use offset to find out which spacemap slot we have to read
 
     for(uint32_t i = 0; i < slots; i++)
     {
@@ -513,14 +664,18 @@ TVMStatus VMMemoryPoolDeallocate(TVMMemoryPoolID memory, void *pointer)
             continue;
         }
 
+        //if we went in here then the deallocation was a failure
         MachineResumeSignals(&OldState); //resume signals
         return VM_STATUS_ERROR_INVALID_PARAMETER;
-        break;
     }
 
     MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMemoryPoolDeallocate()
+
+//***************************************************************************//
+//Thread Functions
+//***************************************************************************//
 
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, 
     TVMThreadPriority prio, TVMThreadIDRef tid)
@@ -531,9 +686,10 @@ TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsiz
     if(entry == NULL || tid == NULL) //invalid
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    uint8_t *stack = new uint8_t[memsize]; //array of threads treated as a stack
     //void *stack; //array of threads treated as a stack
-    //VMMemoryPoolAllocate(VM_MEMORY_POOL_ID_SYSTEM, memsize, &stack); //allocate pool for thread
+    //VMMemoryPoolAllocate(VM_MEMORY_POOL_ID_SYSTEM, (uint32_t)memsize, &stack); //allocate pool for thread
+
+    uint8_t *stack = new uint8_t[memsize]; //array of threads treated as a stack
     TCB *newThread = new TCB; //start new thread
     newThread->threadEntry = entry;
     newThread->threadMemSize = memsize;
@@ -683,6 +839,10 @@ TVMStatus VMThreadSleep(TVMTick tick)
     return VM_STATUS_SUCCESS; //success sleep after reaches zero
 } //VMThreadSleep()
 
+//***************************************************************************//
+//Mutex Functions
+//***************************************************************************//
+
 TVMStatus VMMutexCreate(TVMMutexIDRef mutexref)
 {
     TMachineSignalState OldState; //local variable to suspend signals
@@ -794,6 +954,10 @@ TVMStatus VMMutexRelease(TVMMutexID mutex)
     MachineResumeSignals(&OldState);
     return VM_STATUS_SUCCESS;
 } //VMMutexRelease()
+
+//***************************************************************************//
+//File Functions
+//***************************************************************************//
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
 {
