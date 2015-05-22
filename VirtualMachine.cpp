@@ -25,8 +25,6 @@
 #include <vector>
 #include <queue>
 #include <fcntl.h>
-#include <string.h>
-#include <stdio.h>
 #include <iostream>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
@@ -70,7 +68,36 @@ class MPB
     TVMMemoryPoolID MPid; //memory pool id
     void *base; //pointer for base of stack
     uint8_t *spaceMap; //keep track of sizes and allocated spaces
-}; //clas MPB - Memory Pool Block
+}; //class MPB - Memory Pool Block
+
+class FATData
+{
+    public:
+    unsigned int BPBSize;
+
+    unsigned int bytesPerSecOffset;
+    unsigned int bytesPerSecSize;
+
+    unsigned int secPerClusOffset;
+    unsigned int secPerClusSize;
+
+    unsigned int rsvdSecCntOffset;
+    unsigned int rsvdSecCntSize;
+
+    unsigned int rootEntCntOffset;
+    unsigned int rootEntCntSize;
+
+    unsigned int totSec16Offset;
+    unsigned int totSec16Size;
+
+    unsigned int FATSz16Offset;
+    unsigned int FATSz16Size;
+
+    unsigned int totSec32Offset;
+    unsigned int totSec32Size;
+
+    uint8_t* BPB;
+}; //class FATData
 
 //***************************************************************************//
 //Global Variables & Functions
@@ -95,6 +122,8 @@ queue<TCB*> lowPrio; //low priority queue
 
 vector<TCB*> sleepList; //sleeping threads
 vector<MB*> mutexSleepList; //sleeping mutexs
+
+FATData *VMFAT = new FATData; //global fat var
 
 void AlarmCallBack(void *param, int result)
 {
@@ -314,120 +343,6 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
-/*int main(int argc, char *argv[])
-{
-    //Given defaults
-    int TicksMS = 100;
-    int machineTicks = 100;
-    TVMMemorySize heapSize = 0x1000000; //16 MiB
-    TVMMemorySize sharedSize = 0x4000; //16 KiB
-    char *fatMount = "fat.ima";
-
-    int i = 1;
-    while(i < argc)
-    {
-        if(strcmp(argv[i], "-t") == 0)
-        {
-            i++;
-            if(i >= argc)
-                break;
-
-            if(sscanf(argv[i], "%d", &TicksMS) != 1) //read and make sure we read ticks if any in arg
-            {
-                fprintf(stderr, "Invalid parameter for -t of \"%s\".\n", argv[i]);
-                return 1;
-            }
-
-            if(TicksMS <= 0) //make sure ticks are positive and not zero
-            {
-                fprintf(stderr, "Invalid parameter for -t. It must be positive.\n"); 
-                return 1;
-            }
-        } //-t
-
-        else if(strcmp(argv[i], "-m") == 0)
-        {
-            i++;
-            if(i >= argc)
-                break;
-
-            if(sscanf(argv[i], "%d", &machineTicks) != 1) //ensures we read the machine ticks if any in arg
-            {
-                fprintf(stderr, "Invalid parameter for -m of \"%s\".\n", argv[i]);    
-                return 1;
-            }
-
-            if(machineTicks <= 0) //make sure machine ticks are positive and not zero
-            {
-                fprintf(stderr, "Invalid parameter for -m. It must be positive.\n");    
-                return 1;
-            }
-        } //-m
-
-        else if(strcmp(argv[i], "-h") == 0)
-        {
-            i++;
-            if(i >= argc)
-                break;
-
-            if(sscanf(argv[i], "%u", &heapSize) != 1) //ensures we read the heap size if any in arg
-            {
-                fprintf(stderr, "Invalid parameter for -h of \"%s\".\n", argv[i]);    
-                return 1;
-            }
-
-            if(heapSize <= 0) //make sure heap size is positive and not zero
-            {
-                fprintf(stderr, "Invalid parameter for -h. It must be positive.\n");    
-                return 1;
-            }
-        } //-h
-
-        else if(strcmp(argv[i], "-s") == 0)
-        {
-            i++;
-            if(i >= argc)
-                break;
-
-            if(sscanf(argv[i], "%u", &sharedSize) != 1) //ensures we read the shared size if any in arg
-            {
-                fprintf(stderr, "Invalid parameter for -s of \"%s\".\n", argv[i]);    
-                return 1;
-            }
-
-            if(sharedSize <= 0) //make sure shared size is positive and not zero
-            {
-                fprintf(stderr, "Invalid parameter for -s. It must be positive.\n");    
-                return 1;
-            }
-        } //-s
-
-        else if(strcmp(argv[i], "-f") == 0)
-        {
-            i++;
-            if(i >= argc)
-                break;
-            fatMount = argv[i]; //we got the fat file now
-        } //-f
-
-        else //nothing else after first arg so get out
-            break;
-    } //go through the arguments, read, and start
-
-    if(i >= argc) //check to see if we went over
-    {
-        fprintf(stderr,"Syntax Error!\n");    
-        return 1;
-    }
-
-    if(VMStart(TicksMS, heapSize, machineTicks, sharedSize, fatMount, argc - i, argv + i) != VM_STATUS_SUCCESS)
-    {
-        fprintf(stderr, "Virtual Machine failed to start! Oh my.\n");    
-        return 1;
-    }
-    return 0;
-} //main()*/
-
 //***************************************************************************//
 //The Virtual Machine Starter!
 //***************************************************************************//
@@ -442,15 +357,40 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     MachineEnableSignals(); //start the signals
 
     //Read First Sector
-    //uint8_t* fileImageData;
-    //MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
-    //MachineFileRead(currentThread->fileResult, fileImageData, 512, FileCallback, currentThread);
+    uint8_t* fileImageData = NULL;
+    MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
+    MachineFileRead(currentThread->fileResult, fileImageData, 512, FileCallBack, currentThread);
 
     if(VMMain == NULL) //fail to load module check
         return VM_STATUS_FAILURE;
 
     else //load successful
     {
+        //FAT FILE
+        VMFAT->BPBSize = 36;
+        VMFAT->bytesPerSecOffset = 11;
+        VMFAT->bytesPerSecSize = 2;
+
+        VMFAT->secPerClusOffset = 13;
+        VMFAT->secPerClusSize = 1;
+
+        VMFAT->rsvdSecCntOffset = 14;
+        VMFAT->rsvdSecCntSize = 2;
+
+        VMFAT->rootEntCntOffset = 17;
+        VMFAT->rootEntCntSize = 2;
+
+        VMFAT->totSec16Offset = 19;
+        VMFAT->totSec16Size = 2;
+
+        VMFAT->FATSz16Offset = 22;
+        VMFAT->FATSz16Size = 2;
+
+        VMFAT->totSec32Offset = 32;
+        VMFAT->totSec32Size = 4;
+
+        VMFAT->BPB = new uint8_t[VMFAT->BPBSize]; //initialize the bpb
+
         //THREADS
         uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
         idle->threadID = 0; //idle thread first in array of threads
