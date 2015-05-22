@@ -1,4 +1,4 @@
-/*  A virtual machine for ECS 150 with memory pools and FAT functionality
+/*  A virtual machine for ECS 150 with memory pools and FAT 16 functionality
     Filename: VirtualMachine.cpp
     Authors: John Garcia, Felix Ng
 
@@ -33,6 +33,9 @@ using namespace std;
 
 extern "C"
 {
+//***************************************************************************//
+//Classes
+//***************************************************************************//
 class TCB
 {
     public:
@@ -68,6 +71,10 @@ class MPB
     void *base; //pointer for base of stack
     uint8_t *spaceMap; //keep track of sizes and allocated spaces
 }; //clas MPB - Memory Pool Block
+
+//***************************************************************************//
+//Global Variables & Functions
+//***************************************************************************//
 
 void pushThread(TCB*);
 void pushMutex(MB*);
@@ -307,7 +314,7 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
-int main(int argc, char *argv[])
+/*int main(int argc, char *argv[])
 {
     //Given defaults
     int TicksMS = 100;
@@ -419,7 +426,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     return 0;
-} //main()
+} //main()*/
 
 //***************************************************************************//
 //The Virtual Machine Starter!
