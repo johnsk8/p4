@@ -30,9 +30,9 @@ extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
 
 //BPB
-#define BPB_SIZE 36
-#define BPB_NUM_FATS 2
-#define ROOT_ENT_SZ 32
+#define BPB_Size 36
+#define BPB_NumFATS 2
+#define ROOT_EntSz 32
 #define BPB_BytsPerSec 2
 #define BPB_BytsPerSecOffset 11
 #define BPB_SecPerClus 1
@@ -93,8 +93,10 @@ class FATData
 {
     public:
     uint8_t *BPB; //first 512 bytes in first sector
-    uint8_t *FAT; //directory entry
-    uint8_t *ROOT; //comes after root
+    unsigned int FATSz;
+    unsigned int ROOTSz;
+    uint8_t *FAT; //is going to be of size FATSz
+    uint8_t *ROOT; //is going to be of size ROOTSz
     unsigned int bytesPerSector;
     unsigned int sectorsPerCluster;
     unsigned int reservedSectorCount;
@@ -349,6 +351,16 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
+unsigned int bytesToUnsigned(uint8_t* start, unsigned int size)
+{
+    unsigned int unsignedAccum = 0;
+    for (unsigned int i = 0; i < size; i++)
+        unsignedAccum += ((unsigned int)start[i]) << (8 * i); //bitshift
+
+    cout << unsignedAccum << endl;
+    return unsignedAccum;
+} //bytesToUnsigned()
+
 //***************************************************************************//
 //The Virtual Machine Starter!
 //***************************************************************************//
@@ -373,7 +385,19 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     else //load successful
     {
         //FAT FILE
-        VMFAT->BPB = new uint8_t[BPB_SIZE]; //first sector
+        VMFAT->BPB = new uint8_t[BPB_Size]; //first sector
+        VMFAT->bytesPerSector = bytesToUnsigned(&VMFAT->BPB[BPB_BytsPerSecOffset], BPB_BytsPerSec);
+        VMFAT->sectorsPerCluster = bytesToUnsigned(&VMFAT->BPB[BPB_SecPerClusOffset], BPB_SecPerClus);
+        VMFAT->reservedSectorCount = bytesToUnsigned(&VMFAT->BPB[BPB_RsvdSecCntOffset], BPB_RsvdSecCnt);
+        VMFAT->rootEntityCount = bytesToUnsigned(&VMFAT->BPB[BPB_RootEntCntOffset], BPB_RootEntCnt);
+        VMFAT->totalSectors16 = bytesToUnsigned(&VMFAT->BPB[BPB_TotSec16Offset], BPB_TotSec16);
+        VMFAT->FATSz16 = bytesToUnsigned(&VMFAT->BPB[BPB_FATSz16Offset], BPB_FATSz16);
+        VMFAT->totalSectors32 = bytesToUnsigned(&VMFAT->BPB[BPB_TotSec32Offset], BPB_TotSec32);
+
+        VMFAT->FATSz = BPB_NumFATS * VMFAT->FATSz16;
+        VMFAT->ROOTSz = VMFAT->rootEntityCount * ROOT_EntSz / 512; //handout said divide by 512
+        VMFAT->FAT = new uint8_t[VMFAT->FATSz];
+        VMFAT->ROOT = new uint8_t[VMFAT->ROOTSz];
         
         //THREADS
         uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
