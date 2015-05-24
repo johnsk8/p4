@@ -29,6 +29,25 @@
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
 
+//BPB
+#define BPB_SIZE 36
+#define BPB_NUM_FATS 2
+#define ROOT_ENT_SZ 32
+#define BPB_BytsPerSec 2
+#define BPB_BytsPerSecOffset 11
+#define BPB_SecPerClus 1
+#define BPB_SecPerClusOffset 13
+#define BPB_RsvdSecCnt 2
+#define BPB_RsvdSecCntOffset 14
+#define BPB_RootEntCnt 2
+#define BPB_RootEntCntOffset 17
+#define BPB_TotSec16 2
+#define BPB_TotSec16Offset 19
+#define BPB_FATSz16 2
+#define BPB_FATSz16Offset 22
+#define BPB_TotSec32 4
+#define BPB_TotSec32Offset 32
+
 extern "C"
 {
 //***************************************************************************//
@@ -73,34 +92,20 @@ class MPB
 class FATData
 {
     public:
-    unsigned int BPBSize;
-
-    unsigned int bytesPerSecOffset;
-    unsigned int bytesPerSecSize;
-
-    unsigned int secPerClusOffset;
-    unsigned int secPerClusSize;
-
-    unsigned int rsvdSecCntOffset;
-    unsigned int rsvdSecCntSize;
-
-    unsigned int rootEntCntOffset;
-    unsigned int rootEntCntSize;
-
-    unsigned int totSec16Offset;
-    unsigned int totSec16Size;
-
-    unsigned int FATSz16Offset;
-    unsigned int FATSz16Size;
-
-    unsigned int totSec32Offset;
-    unsigned int totSec32Size;
-
-    uint8_t* BPB;
+    uint8_t *BPB; //first 512 bytes in first sector
+    uint8_t *FAT; //directory entry
+    uint8_t *ROOT; //comes after root
+    unsigned int bytesPerSector;
+    unsigned int sectorsPerCluster;
+    unsigned int reservedSectorCount;
+    unsigned int rootEntityCount;
+    unsigned int totalSectors16;
+    unsigned int FATSz16;
+    unsigned int totalSectors32;
 }; //class FATData
 
 //***************************************************************************//
-//Global Variables & Functions
+//Global Variables & Utility Functions
 //***************************************************************************//
 
 void pushThread(TCB*);
@@ -115,6 +120,7 @@ TCB *currentThread = new TCB; //global current running thread
 vector<MB*> mutexList; //to hold mutexs
 vector<TCB*> threadList; //global ptr list to hold threads
 vector<MPB*> memPoolList; //global ptr list to hold memory pools
+vector<uint16_t> FATTablesList; //global vector for fat tables
 
 queue<TCB*> highPrio; //high priority queue
 queue<TCB*> normPrio; //normal priority queue
@@ -367,30 +373,8 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     else //load successful
     {
         //FAT FILE
-        VMFAT->BPBSize = 36;
-        VMFAT->bytesPerSecOffset = 11;
-        VMFAT->bytesPerSecSize = 2;
-
-        VMFAT->secPerClusOffset = 13;
-        VMFAT->secPerClusSize = 1;
-
-        VMFAT->rsvdSecCntOffset = 14;
-        VMFAT->rsvdSecCntSize = 2;
-
-        VMFAT->rootEntCntOffset = 17;
-        VMFAT->rootEntCntSize = 2;
-
-        VMFAT->totSec16Offset = 19;
-        VMFAT->totSec16Size = 2;
-
-        VMFAT->FATSz16Offset = 22;
-        VMFAT->FATSz16Size = 2;
-
-        VMFAT->totSec32Offset = 32;
-        VMFAT->totSec32Size = 4;
-
-        VMFAT->BPB = new uint8_t[VMFAT->BPBSize]; //initialize the bpb
-
+        VMFAT->BPB = new uint8_t[BPB_SIZE]; //first sector
+        
         //THREADS
         uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
         idle->threadID = 0; //idle thread first in array of threads
