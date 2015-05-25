@@ -25,6 +25,7 @@
 #include <vector>
 #include <queue>
 #include <fcntl.h>
+#include <cmath>
 #include <iostream>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
@@ -132,6 +133,10 @@ vector<TCB*> sleepList; //sleeping threads
 vector<MB*> mutexSleepList; //sleeping mutexs
 
 FATData *VMFAT = new FATData; //global fat var
+unsigned int FirstRootSector;
+unsigned int RootDirectorySectors;
+unsigned int FirstDataSector;
+unsigned int ClusterCount;
 
 void AlarmCallBack(void *param, int result)
 {
@@ -351,13 +356,11 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
-unsigned int bytesToUnsigned(uint8_t* start, unsigned int size)
+unsigned int bytesToUnsigned(uint8_t* BPB, unsigned int offset, unsigned int size)
 {
     unsigned int unsignedAccum = 0;
-    for (unsigned int i = 0; i < size; i++)
-        unsignedAccum += ((unsigned int)start[i]) << (8 * i); //bitshift
-
-    cout << unsignedAccum << endl;
+    for(unsigned int i = 0; i < size; i++)
+        unsignedAccum += ((unsigned int)BPB[offset + i] * pow(2,i*8));
     return unsignedAccum;
 } //bytesToUnsigned()
 
@@ -374,31 +377,11 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     MachineRequestAlarm(usec, (TMachineAlarmCallback)AlarmCallBack, NULL); //starts the alarm tick
     MachineEnableSignals(); //start the signals
 
-    //Read First Sector
-    uint8_t* fileImageData = NULL;
-    MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
-    MachineFileRead(currentThread->fileResult, fileImageData, 512, FileCallBack, currentThread);
-
     if(VMMain == NULL) //fail to load module check
         return VM_STATUS_FAILURE;
 
     else //load successful
     {
-        //FAT FILE
-        VMFAT->BPB = new uint8_t[BPB_Size]; //first sector
-        VMFAT->bytesPerSector = bytesToUnsigned(&VMFAT->BPB[BPB_BytsPerSecOffset], BPB_BytsPerSec);
-        VMFAT->sectorsPerCluster = bytesToUnsigned(&VMFAT->BPB[BPB_SecPerClusOffset], BPB_SecPerClus);
-        VMFAT->reservedSectorCount = bytesToUnsigned(&VMFAT->BPB[BPB_RsvdSecCntOffset], BPB_RsvdSecCnt);
-        VMFAT->rootEntityCount = bytesToUnsigned(&VMFAT->BPB[BPB_RootEntCntOffset], BPB_RootEntCnt);
-        VMFAT->totalSectors16 = bytesToUnsigned(&VMFAT->BPB[BPB_TotSec16Offset], BPB_TotSec16);
-        VMFAT->FATSz16 = bytesToUnsigned(&VMFAT->BPB[BPB_FATSz16Offset], BPB_FATSz16);
-        VMFAT->totalSectors32 = bytesToUnsigned(&VMFAT->BPB[BPB_TotSec32Offset], BPB_TotSec32);
-
-        VMFAT->FATSz = BPB_NumFATS * VMFAT->FATSz16;
-        VMFAT->ROOTSz = VMFAT->rootEntityCount * ROOT_EntSz / 512; //handout said divide by 512
-        VMFAT->FAT = new uint8_t[VMFAT->FATSz];
-        VMFAT->ROOT = new uint8_t[VMFAT->ROOTSz];
-        
         //THREADS
         uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
         idle->threadID = 0; //idle thread first in array of threads
@@ -433,7 +416,66 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
 
         memPoolList.push_back(sharedMPB); //push sharedmemblock into poolList[0]
         memPoolList.push_back(VMMainMPB); //push main into mem pool list[1]
+
+        //FATS
+        void *fileImageData = NULL; //uint8_t* fileImageData = NULL;
+        MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
+        //cout << "after file open result is " << currentThread->fileResult << endl;
+
+        VMMemoryPoolAllocate(0, 512, &fileImageData);
+        MachineFileRead(currentThread->fileResult, fileImageData, 512, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
+        //cout << "after file read result is " << currentThread->fileResult << endl;
+
+        VMFAT->BPB = (uint8_t*)fileImageData; //new uint8_t[BPB_Size]; //first sector
         
+        VMFAT->bytesPerSector = bytesToUnsigned(VMFAT->BPB, BPB_BytsPerSecOffset, BPB_BytsPerSec);
+        cout << "BPB_BytsPerSec: " << VMFAT->bytesPerSector << endl;
+
+        VMFAT->sectorsPerCluster = bytesToUnsigned(VMFAT->BPB, BPB_SecPerClusOffset, BPB_SecPerClus);
+        cout << "BPB_SecPerClus: " << VMFAT->sectorsPerCluster << endl;
+
+        VMFAT->reservedSectorCount = bytesToUnsigned(VMFAT->BPB, BPB_RsvdSecCntOffset, BPB_RsvdSecCnt);
+        cout << "BPB_RsvdSecCnt: " << VMFAT->reservedSectorCount << endl;
+
+        VMFAT->rootEntityCount = bytesToUnsigned(VMFAT->BPB, BPB_RootEntCntOffset, BPB_RootEntCnt);
+        cout << "BPB_RootEntCnt: " << VMFAT->rootEntityCount << endl;
+
+        VMFAT->totalSectors16 = bytesToUnsigned(VMFAT->BPB, BPB_TotSec16Offset, BPB_TotSec16);
+        cout << "BPB_TotSec16: " << VMFAT->totalSectors16 << endl;
+
+        VMFAT->FATSz16 = bytesToUnsigned(VMFAT->BPB, BPB_FATSz16Offset, BPB_FATSz16);
+        cout << "BPB_FATSz16: " << VMFAT->FATSz16 << endl;
+
+        VMFAT->totalSectors32 = bytesToUnsigned(VMFAT->BPB, BPB_TotSec32Offset, BPB_TotSec32);
+        cout << "BPB_TotSec32: " << VMFAT->totalSectors32 << endl;
+
+        VMFAT->FATSz = BPB_NumFATS * VMFAT->FATSz16;
+        cout << "FATSz16: " << VMFAT->FATSz << endl;
+
+        VMFAT->ROOTSz = VMFAT->rootEntityCount * ROOT_EntSz / 512; //handout said divide by 512
+        cout << "ROOTSz16: " << VMFAT->ROOTSz << endl;
+
+        VMFAT->FAT = new uint8_t[VMFAT->FATSz];
+
+        VMFAT->ROOT = new uint8_t[VMFAT->ROOTSz];
+
+        FirstRootSector = BPB_RsvdSecCnt + BPB_NumFATS * BPB_FATSz16;
+        cout << "FirstRootSector: " << FirstRootSector << endl;
+
+        RootDirectorySectors = (BPB_RootEntCnt * 32)/512;
+        cout << "RootDirectorySectors: " << RootDirectorySectors << endl;
+
+        FirstDataSector = FirstRootSector + RootDirectorySectors;
+        cout << "FirstDataSector: " << FirstDataSector << endl;
+
+        ClusterCount = (BPB_TotSec32 - FirstDataSector)/BPB_SecPerClus;
+        cout << "ClusterCount: " << ClusterCount << endl;
+
+        //END
         VMMain(argc, argv); //call to vmmain
         return VM_STATUS_SUCCESS;
     }
