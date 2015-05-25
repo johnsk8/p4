@@ -3,7 +3,7 @@
     Authors: John Garcia, Felix Ng
 
     In this version:
-    VMStart -                           starting
+    VMStart -                           done
     VMDirectoryOpen -                   not started      
     VMDirectoryClose -                  not started
     VMDirectoryRead -                   not started
@@ -25,7 +25,6 @@
 #include <vector>
 #include <queue>
 #include <fcntl.h>
-#include <cmath>
 #include <iostream>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
@@ -359,8 +358,8 @@ void scheduleMutex(MB *myMutex)
 unsigned int bytesToUnsigned(uint8_t* BPB, unsigned int offset, unsigned int size)
 {
     unsigned int unsignedAccum = 0;
-    for(unsigned int i = 0; i < size; i++)
-        unsignedAccum += ((unsigned int)BPB[offset + i] * pow(2,i*8));
+    for(unsigned int i = 0; i < size; i++) //loop through until we reached size and convert to uints
+        unsignedAccum += ((unsigned int)BPB[offset + i] << (i*8)); //bit shifting
     return unsignedAccum;
 } //bytesToUnsigned()
 
@@ -433,47 +432,47 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         VMFAT->BPB = (uint8_t*)fileImageData; //new uint8_t[BPB_Size]; //first sector
         
         VMFAT->bytesPerSector = bytesToUnsigned(VMFAT->BPB, BPB_BytsPerSecOffset, BPB_BytsPerSec);
-        cout << "BPB_BytsPerSec: " << VMFAT->bytesPerSector << endl;
+        //cout << "BPB_BytsPerSec: " << VMFAT->bytesPerSector << endl;
 
         VMFAT->sectorsPerCluster = bytesToUnsigned(VMFAT->BPB, BPB_SecPerClusOffset, BPB_SecPerClus);
-        cout << "BPB_SecPerClus: " << VMFAT->sectorsPerCluster << endl;
+        //cout << "BPB_SecPerClus: " << VMFAT->sectorsPerCluster << endl;
 
         VMFAT->reservedSectorCount = bytesToUnsigned(VMFAT->BPB, BPB_RsvdSecCntOffset, BPB_RsvdSecCnt);
-        cout << "BPB_RsvdSecCnt: " << VMFAT->reservedSectorCount << endl;
+        //cout << "BPB_RsvdSecCnt: " << VMFAT->reservedSectorCount << endl;
 
         VMFAT->rootEntityCount = bytesToUnsigned(VMFAT->BPB, BPB_RootEntCntOffset, BPB_RootEntCnt);
-        cout << "BPB_RootEntCnt: " << VMFAT->rootEntityCount << endl;
+        //cout << "BPB_RootEntCnt: " << VMFAT->rootEntityCount << endl;
 
         VMFAT->totalSectors16 = bytesToUnsigned(VMFAT->BPB, BPB_TotSec16Offset, BPB_TotSec16);
-        cout << "BPB_TotSec16: " << VMFAT->totalSectors16 << endl;
+        //cout << "BPB_TotSec16: " << VMFAT->totalSectors16 << endl;
 
         VMFAT->FATSz16 = bytesToUnsigned(VMFAT->BPB, BPB_FATSz16Offset, BPB_FATSz16);
-        cout << "BPB_FATSz16: " << VMFAT->FATSz16 << endl;
+        //cout << "BPB_FATSz16: " << VMFAT->FATSz16 << endl;
 
         VMFAT->totalSectors32 = bytesToUnsigned(VMFAT->BPB, BPB_TotSec32Offset, BPB_TotSec32);
-        cout << "BPB_TotSec32: " << VMFAT->totalSectors32 << endl;
+        //cout << "BPB_TotSec32: " << VMFAT->totalSectors32 << endl;
 
         VMFAT->FATSz = BPB_NumFATS * VMFAT->FATSz16;
-        cout << "FATSz16: " << VMFAT->FATSz << endl;
+        //cout << "FATSz16: " << VMFAT->FATSz << endl;
 
         VMFAT->ROOTSz = VMFAT->rootEntityCount * ROOT_EntSz / 512; //handout said divide by 512
-        cout << "ROOTSz16: " << VMFAT->ROOTSz << endl;
+        //cout << "ROOTSz16: " << VMFAT->ROOTSz << endl;
 
         VMFAT->FAT = new uint8_t[VMFAT->FATSz];
 
         VMFAT->ROOT = new uint8_t[VMFAT->ROOTSz];
 
-        FirstRootSector = BPB_RsvdSecCnt + BPB_NumFATS * BPB_FATSz16;
-        cout << "FirstRootSector: " << FirstRootSector << endl;
+        FirstRootSector = VMFAT->reservedSectorCount + BPB_NumFATS * VMFAT->FATSz16;
+        //cout << "FirstRootSector: " << FirstRootSector << endl;
 
-        RootDirectorySectors = (BPB_RootEntCnt * 32)/512;
-        cout << "RootDirectorySectors: " << RootDirectorySectors << endl;
+        RootDirectorySectors = (VMFAT->rootEntityCount * 32)/512;
+        //cout << "RootDirectorySectors: " << RootDirectorySectors << endl;
 
         FirstDataSector = FirstRootSector + RootDirectorySectors;
-        cout << "FirstDataSector: " << FirstDataSector << endl;
+        //cout << "FirstDataSector: " << FirstDataSector << endl;
 
-        ClusterCount = (BPB_TotSec32 - FirstDataSector)/BPB_SecPerClus;
-        cout << "ClusterCount: " << ClusterCount << endl;
+        ClusterCount = (VMFAT->totalSectors32 - FirstDataSector)/VMFAT->sectorsPerCluster;
+        //cout << "ClusterCount: " << ClusterCount << endl;
 
         //END
         VMMain(argc, argv); //call to vmmain
