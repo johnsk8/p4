@@ -55,7 +55,7 @@ using namespace std;
 #define BPB_TotSec32Offset 32
 #define ROOT_EntSz 32
 
-//DIR
+//DIR - Given
 #define ATTR_READ_ONLY 0x01
 #define ATTR_HIDDEN 0x02
 #define ATTR_SYSTEM 0x04
@@ -71,7 +71,7 @@ extern "C"
 //***************************************************************************//
 class TCB
 {
-    public:
+public:
     TVMThreadID threadID; //to hold the threads ID
     TVMThreadPriority threadPrior; //for the threads priority
     TVMThreadState threadState; //for thread stack
@@ -86,7 +86,7 @@ class TCB
 
 class MB
 {
-    public:
+public:
     TVMMutexID mutexID; //holds mutex ID
     TVMMutexIDRef mutexIDRef;
     TCB *ownerThread; //the owner for thread
@@ -98,7 +98,7 @@ class MB
 
 class MPB
 {
-    public:
+public:
     TVMMemorySize MPsize; //size of memory pool
     TVMMemoryPoolID MPid; //memory pool id
     void *base; //pointer for base of stack
@@ -107,7 +107,7 @@ class MPB
 
 class BPB
 {
-    public:
+public:
     uint8_t *BPB; //first 512 bytes in first sector
     unsigned int bytesPerSector;
     unsigned int sectorsPerCluster;
@@ -124,13 +124,13 @@ class BPB
 
 class FAT
 {
-    public:
+public:
     unsigned int FATSz;
 }; //class FAT
 
 class RootEntry
 {
-    public:
+public:
     char DIR_Name[11];
     uint8_t DIR_Attr;
     uint16_t DIR_WrtTime;
@@ -141,10 +141,10 @@ class RootEntry
 
 class Directory
 {
-    public:
+public:
     uint8_t dirStart; //first cluster of the directory
     uint8_t currentLocation; //the current location in the dir
-    uint8_t offset;
+    uint8_t offset;  //how far through each cluster we have read
 }; //class Directory
 
 //***************************************************************************//
@@ -505,9 +505,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         //unsigned int ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
 
         //FAT Sector
-        FAT->FATSz = BPB_NumFATs * BPB->FATSz16; //2 * 17 = 34
-        //cout << "FATsz: " << FAT->FATSz << endl;
-        //cout << "FATsz16: " << BPB->FATSz16 << endl;
+        FAT->FATSz = BPB_NumFATs * BPB->FATSz16; //2 * 17 = 34 being total fat size
 
         for(unsigned int i = 1; i <= BPB->FATSz16; i++) //loop through primary fat here
         {
@@ -572,7 +570,9 @@ TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
         then I create a new struct with its starting cluster = 0 and store it
     else if dirname is something else
         then create a new struct and set the starting cluster to the appropriate value and store it
-    note: opening a sub directory might require that you read in from a cluster*/
+    note: opening a sub directory might require that you read in from a cluster.
+    We should block the calling thread in the wait state if the opening of the directory/file 
+    cannot be completely immediately.*/
 
     return VM_STATUS_SUCCESS;
 } //VMDirectoryOpen()
