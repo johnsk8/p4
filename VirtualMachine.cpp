@@ -126,14 +126,11 @@ class FAT
 {
     public:
     unsigned int FATSz;
-    uint8_t *FATSector; //is going to be of size FATSz
 }; //class FAT
 
 class RootEntry
 {
     public:
-    unsigned int ROOTSz;
-    uint8_t *ROOTSector; //is going to be of size ROOTSz
     char DIR_Name[11];
     uint8_t DIR_Attr;
     uint16_t DIR_WrtTime;
@@ -408,33 +405,6 @@ unsigned int bytesToUnsigned(uint8_t* BPB, unsigned int offset, unsigned int siz
     return unsignedAccum;
 } //bytesToUnsigned()
 
-/*void readFATSector(int sectorNumber, char *buffer)
-{
-    void *fileImageData = NULL;
-    VMMemoryPoolAllocate(0, 512, &fileImageData);
-    
-    for(unsigned int i = 1; i <= 1; i++)
-    {
-        MachineFileSeek(FATfd, i * 512, 0, FileCallBack, currentThread);
-        currentThread->threadState = VM_THREAD_STATE_WAITING;
-        Scheduler(); //wait for it to complete
-        
-        MachineFileRead(FATfd, fileImageData, i * 512, FileCallBack, currentThread);
-        currentThread->threadState = VM_THREAD_STATE_WAITING;
-        Scheduler(); //wait for it to complete
-
-        buffer = (char*)fileImageData;
-        uint16_t *Words = (uint16_t *)buffer;
-        for(unsigned int a = 1; a < 72; a++)
-        {
-            FATTablesList.push_back(Words[a]); //read sector into buffer
-            cout << Words[a] << endl;
-        }
-    }
-
-    VMMemoryPoolDeallocate(0, &fileImageData);
-} //readFATSector()*/
-
 uint8_t* readSector(uint32_t sector)
 {
     void* sharedMem;
@@ -529,35 +499,31 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         BPB->totalSectors32 = bytesToUnsigned(BPB->BPB, BPB_TotSec32Offset, BPB_TotSec32);
         
         //The other variables
-        unsigned int FirstRootSector = BPB->reservedSectorCount + BPB_NumFATs * BPB->FATSz16;
+        unsigned int FirstRootSector = BPB->reservedSectorCount + (BPB_NumFATs * BPB->FATSz16);
         unsigned int RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
-        unsigned int FirstDataSector = FirstRootSector + RootDirectorySectors;
-        unsigned int ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
+        //unsigned int FirstDataSector = FirstRootSector + RootDirectorySectors;
+        //unsigned int ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
 
         //FAT Sector
-        FAT->FATSz = BPB_NumFATs * BPB->FATSz16;
-        FAT->FATSector = new uint8_t[FAT->FATSz];
+        FAT->FATSz = BPB_NumFATs * BPB->FATSz16; //2 * 17 = 34
+        //cout << "FATsz: " << FAT->FATSz << endl;
+        //cout << "FATsz16: " << BPB->FATSz16 << endl;
 
-        for(unsigned int i = 1; i <= 34; i++)
+        for(unsigned int i = 1; i <= BPB->FATSz16; i++) //loop through primary fat here
         {
             uint8_t *FATEntry = readSector(1);
-
-            uint16_t *FATS = (uint16_t*)FATEntry;
-            for(unsigned int a = 1; a <= 256; a++)
+            uint16_t *FATS = (uint16_t*)FATEntry; //(uint16_t*)FATEntry;
+            for(unsigned int a = 0; a < 256; a++)
             {
-                FATTablesList.push_back(FATS[a]); //read sector into buffer
-                //cout << FATS[a] << endl;
+                FATTablesList.push_back(FATS[a]); //read sector and store into vector
+                cout << FATS[a] << endl;
             }
         }
 
         //ROOT Sector
-        ROOT->ROOTSz = (BPB->rootEntityCount * ROOT_EntSz)/512;
-        ROOT->ROOTSector = new uint8_t[ROOT->ROOTSz];
-
         for(uint32_t i = 0; i < RootDirectorySectors; ++i)
         {
             uint32_t sector = i + FirstRootSector; //starts at
-
             uint8_t *rootSector = readSector(sector);
 
             for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
@@ -568,7 +534,6 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
                     continue;
 
                 RootEntry *myEntry = new RootEntry;
-            
                 myEntry->DIR_Attr = rootSector[secOffset + 11];
 
                 for(int k = 0; k < 11; ++k)
@@ -578,7 +543,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
                 myEntry->DIR_WrtTime = rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22];
                 myEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
                 myEntry->DIR_FileSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
-                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28]; // store filesize
+                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28]; //store filesize
             
                 RootEntryList.push_back(myEntry);
                 //cerr << secOffset / 32 << " " << (char*)myEntry->DIR_Name << " attr: " 
