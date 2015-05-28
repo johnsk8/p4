@@ -4,7 +4,7 @@
 
     In this version:
     VMStart -                           done
-    VMDirectoryOpen -                   not started      
+    VMDirectoryOpen -                   starting
     VMDirectoryClose -                  not started
     VMDirectoryRead -                   not started
     VMDirectoryRewind -                 not started
@@ -30,23 +30,39 @@ extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
 
 //BPB - Given
-#define BPB_Size 36
-#define BPB_NumFATS 2
-#define ROOT_EntSz 32
 #define BPB_BytsPerSec 2
 #define BPB_BytsPerSecOffset 11
 #define BPB_SecPerClus 1
 #define BPB_SecPerClusOffset 13
 #define BPB_RsvdSecCnt 2
 #define BPB_RsvdSecCntOffset 14
+#define BPB_NumFATs 2
 #define BPB_RootEntCnt 2
 #define BPB_RootEntCntOffset 17
 #define BPB_TotSec16 2
 #define BPB_TotSec16Offset 19
+#define BPB_Media 1
+#define BPB_MediaOffset 21
 #define BPB_FATSz16 2
 #define BPB_FATSz16Offset 22
+#define BPB_SecPerTrk 2
+#define BPB_SecPerTrkOffset 24
+#define BPB_NumHeads 2
+#define BPB_NumHeadsOffset 26
+#define BPB_HiddSec 4
+#define BPB_HiddSecOffset 28
 #define BPB_TotSec32 4
 #define BPB_TotSec32Offset 32
+#define ROOT_EntSz 32
+
+//DIR
+#define ATTR_READ_ONLY 0x01
+#define ATTR_HIDDEN 0x02
+#define ATTR_SYSTEM 0x04
+#define ATTR_VOLUME_ID 0x08
+#define ATTR_DIRECTORY 0x10
+#define ATTR_ARCHIVE 0x20
+#define ATTR_LONG_NAME 0x0F //(ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID)
 
 extern "C"
 {
@@ -98,7 +114,11 @@ class BPB
     unsigned int reservedSectorCount;
     unsigned int rootEntityCount;
     unsigned int totalSectors16;
+    unsigned int media;
     unsigned int FATSz16;
+    unsigned int sectorsPerTrack;
+    unsigned int numberHeads;
+    unsigned int hiddenSectors;
     unsigned int totalSectors32;
 }; //class BPB - BIOS Parameter Block
 
@@ -114,22 +134,24 @@ class RootEntry
     public:
     unsigned int ROOTSz;
     uint8_t *ROOTSector; //is going to be of size ROOTSz
-    uint8_t *DIR_Name;
+    char DIR_Name[11];
     uint8_t DIR_Attr;
-    uint8_t DIR_NTRes;
-    uint8_t DIR_CrtTimeTenth;
-    uint16_t DIR_CrtTime;
-    uint16_t DIR_CrtDate;
-    uint16_t DIR_LstAccDate;
-    uint16_t DIR_FstClusHI;
     uint16_t DIR_WrtTime;
     uint16_t DIR_WrtDate;
     uint16_t DIR_FstClusLO;
     uint32_t DIR_FileSize;
 }; //class RootEntry
 
+class Directory
+{
+    public:
+    uint8_t dirStart; //first cluster of the directory
+    uint8_t currentLocation; //the current location in the dir
+    uint8_t offset;
+}; //class Directory
+
 //***************************************************************************//
-//Global Variables & Utility Functions
+//Function Prototypes, Global Variables, & Utility Functions
 //***************************************************************************//
 
 void pushThread(TCB*);
@@ -147,7 +169,7 @@ vector<MB*> mutexList; //to hold mutexs
 vector<TCB*> threadList; //global ptr list to hold threads
 vector<MPB*> memPoolList; //global ptr list to hold memory pools
 vector<uint16_t> FATTablesList; //global vector for fat tables
-vector<RootEntry> RootEntryList; //basically the RootEntryList
+vector<RootEntry*> RootEntryList; //basically the RootEntryList
 
 queue<TCB*> highPrio; //high priority queue
 queue<TCB*> normPrio; //normal priority queue
@@ -159,11 +181,6 @@ vector<MB*> mutexSleepList; //sleeping mutexs
 BPB *BPB = new class BPB;
 FAT *FAT = new class FAT;
 RootEntry *ROOT = new class RootEntry;
-
-unsigned int FirstRootSector;
-unsigned int RootDirectorySectors;
-unsigned int FirstDataSector;
-unsigned int ClusterCount;
 
 void AlarmCallBack(void *param, int result)
 {
@@ -391,6 +408,53 @@ unsigned int bytesToUnsigned(uint8_t* BPB, unsigned int offset, unsigned int siz
     return unsignedAccum;
 } //bytesToUnsigned()
 
+/*void readFATSector(int sectorNumber, char *buffer)
+{
+    void *fileImageData = NULL;
+    VMMemoryPoolAllocate(0, 512, &fileImageData);
+    
+    for(unsigned int i = 1; i <= 1; i++)
+    {
+        MachineFileSeek(FATfd, i * 512, 0, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler(); //wait for it to complete
+        
+        MachineFileRead(FATfd, fileImageData, i * 512, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler(); //wait for it to complete
+
+        buffer = (char*)fileImageData;
+        uint16_t *Words = (uint16_t *)buffer;
+        for(unsigned int a = 1; a < 72; a++)
+        {
+            FATTablesList.push_back(Words[a]); //read sector into buffer
+            cout << Words[a] << endl;
+        }
+    }
+
+    VMMemoryPoolDeallocate(0, &fileImageData);
+} //readFATSector()*/
+
+uint8_t* readSector(uint32_t sector)
+{
+    void* sharedMem;
+    uint8_t* sectorData;
+    VMMemoryPoolAllocate(0, 512, &sharedMem);
+
+    MachineFileSeek(FATfd, sector * 512, 0, FileCallBack, currentThread);
+    currentThread->threadState = VM_THREAD_STATE_WAITING;
+    Scheduler();
+
+    MachineFileRead(FATfd, sharedMem, 512, FileCallBack, currentThread);
+    currentThread->threadState = VM_THREAD_STATE_WAITING;
+    Scheduler();
+
+    sectorData = (uint8_t*)sharedMem;
+
+    VMMemoryPoolDeallocate(0, &sharedMem);
+    return sectorData;
+} //readSector()
+
 //***************************************************************************//
 //The Virtual Machine Starter!
 //***************************************************************************//
@@ -409,7 +473,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
 
     else //load successful
     {
-        //THREADS
+        //THREADS START
         uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
         idle->threadID = 0; //idle thread first in array of threads
         idle->threadState = VM_THREAD_STATE_DEAD;
@@ -427,7 +491,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         threadList.push_back(idle); //push into pos 0
         threadList.push_back(VMMainTCB); //push into pos 1
 
-        //MEMORY POOLS
+        //MEMORY POOLS START
         MPB *sharedMPB = new MPB;
         sharedMPB->MPsize = sharedsize; 
         sharedMPB->MPid = 0; //shared pool id is 0
@@ -444,57 +508,84 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         memPoolList.push_back(sharedMPB); //push sharedmemblock into poolList[0]
         memPoolList.push_back(VMMainMPB); //push main into mem pool list[1]
 
-        //FAT 16
-        void *fileImageData = NULL; //uint8_t* fileImageData = NULL;
+        //FAT 16 START
         MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
-
-        VMMemoryPoolAllocate(0, 512, &fileImageData);
         FATfd = currentThread->fileResult;
-        MachineFileRead(FATfd, fileImageData, 512, FileCallBack, currentThread);
-        currentThread->threadState = VM_THREAD_STATE_WAITING;
-        Scheduler();
 
         //BPB Sector
-        BPB->BPB = (uint8_t*)fileImageData;
+        BPB->BPB = readSector(0);
         BPB->bytesPerSector = bytesToUnsigned(BPB->BPB, BPB_BytsPerSecOffset, BPB_BytsPerSec);
         BPB->sectorsPerCluster = bytesToUnsigned(BPB->BPB, BPB_SecPerClusOffset, BPB_SecPerClus);
         BPB->reservedSectorCount = bytesToUnsigned(BPB->BPB, BPB_RsvdSecCntOffset, BPB_RsvdSecCnt);
         BPB->rootEntityCount = bytesToUnsigned(BPB->BPB, BPB_RootEntCntOffset, BPB_RootEntCnt);
         BPB->totalSectors16 = bytesToUnsigned(BPB->BPB, BPB_TotSec16Offset, BPB_TotSec16);
+        BPB->media = bytesToUnsigned(BPB->BPB, BPB_MediaOffset, BPB_Media);
         BPB->FATSz16 = bytesToUnsigned(BPB->BPB, BPB_FATSz16Offset, BPB_FATSz16);
+        BPB->sectorsPerTrack = bytesToUnsigned(BPB->BPB, BPB_SecPerTrkOffset, BPB_SecPerTrk);
+        BPB->numberHeads = bytesToUnsigned(BPB->BPB, BPB_NumHeadsOffset, BPB_NumHeads);
+        BPB->hiddenSectors = bytesToUnsigned(BPB->BPB, BPB_HiddSecOffset, BPB_HiddSec);
         BPB->totalSectors32 = bytesToUnsigned(BPB->BPB, BPB_TotSec32Offset, BPB_TotSec32);
+        
+        //The other variables
+        unsigned int FirstRootSector = BPB->reservedSectorCount + BPB_NumFATs * BPB->FATSz16;
+        unsigned int RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
+        unsigned int FirstDataSector = FirstRootSector + RootDirectorySectors;
+        unsigned int ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
 
         //FAT Sector
-        FAT->FATSz = BPB_NumFATS * BPB->FATSz16;
+        FAT->FATSz = BPB_NumFATs * BPB->FATSz16;
         FAT->FATSector = new uint8_t[FAT->FATSz];
+
+        for(unsigned int i = 1; i <= 34; i++)
+        {
+            uint8_t *FATEntry = readSector(1);
+
+            uint16_t *FATS = (uint16_t*)FATEntry;
+            for(unsigned int a = 1; a <= 256; a++)
+            {
+                FATTablesList.push_back(FATS[a]); //read sector into buffer
+                //cout << FATS[a] << endl;
+            }
+        }
 
         //ROOT Sector
         ROOT->ROOTSz = (BPB->rootEntityCount * ROOT_EntSz)/512;
         ROOT->ROOTSector = new uint8_t[ROOT->ROOTSz];
 
-        //The rest of the other variables
-        FirstRootSector = BPB->reservedSectorCount + BPB_NumFATS * BPB->FATSz16;
-        RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
-        FirstDataSector = FirstRootSector + RootDirectorySectors;
-        ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
-
-        /*for(unsigned int i = 0; i < BPB->rootEntityCount; i++)
+        for(uint32_t i = 0; i < RootDirectorySectors; ++i)
         {
-            MachineFileSeek(FATfd, i * 32, 33 * 512, FileCallBack, currentThread);
-            currentThread->threadState = VM_THREAD_STATE_WAITING;
-            Scheduler();
+            uint32_t sector = i + FirstRootSector; //starts at
 
-            RootEntry *myRootEntry = new RootEntry;
-            memcpy(myRootEntry->DIR_Name, &currentThread->fileResult, 11); //holds ptr for name
+            uint8_t *rootSector = readSector(sector);
 
-            if(i == 11)
-            {
-                cout << myRootEntry->DIR_Name[0] << endl;
-                break;
-            }
-        }*/
+            for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
+            {      
+                if(rootSector[secOffset] == 0x00) //stop, no more entries
+                    goto afterRoot;
+                if(rootSector[secOffset + 11] == ATTR_LONG_NAME) //skip longfile names
+                    continue;
+
+                RootEntry *myEntry = new RootEntry;
+            
+                myEntry->DIR_Attr = rootSector[secOffset + 11];
+
+                for(int k = 0; k < 11; ++k)
+                    myEntry->DIR_Name[k] = rootSector[secOffset + k];
+
+                myEntry->DIR_WrtDate = rootSector[secOffset + 25] << 8 | rootSector[secOffset + 24];
+                myEntry->DIR_WrtTime = rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22];
+                myEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
+                myEntry->DIR_FileSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
+                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28]; // store filesize
+            
+                RootEntryList.push_back(myEntry);
+                //cerr << secOffset / 32 << " " << (char*)myEntry->DIR_Name << " attr: " 
+                    //<< hex << (int)myEntry->DIR_Attr << dec << endl;
+            } //for each entry
+        } //for each sector
+        afterRoot: //just for using goto
 
         //END
         VMMain(argc, argv); //call to vmmain
@@ -510,6 +601,13 @@ TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
 {
     if(dirname == NULL || dirdescriptor == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
+
+    /*check dirname
+    if its "/" 
+        then I create a new struct with its starting cluster = 0 and store it
+    else if dirname is something else
+        then create a new struct and set the starting cluster to the appropriate value and store it
+    note: opening a sub directory might require that you read in from a cluster*/
 
     return VM_STATUS_SUCCESS;
 } //VMDirectoryOpen()
