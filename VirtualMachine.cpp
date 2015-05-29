@@ -3,14 +3,22 @@
     Authors: John Garcia, Felix Ng
 
     In this version:
-    VMStart -                           done
-    VMDirectoryOpen -                   starting
-    VMDirectoryClose -                  not started
-    VMDirectoryRead -                   not started
-    VMDirectoryRewind -                 not started
-    VMDirectoryCurrent -                not started
-    VMDirectoryChange -                 not started
-    Threads Create/Delete -             NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
+    VMStart -                   done
+    BPB sector -                done
+    FAT sector -                done
+    ROOT sector -               done
+    VMDirectoryOpen -           starting
+    VMDirectoryClose -          not started
+    VMDirectoryRead -           not started
+    VMDirectoryRewind -         not started
+    VMDirectoryCurrent -        not started
+    VMDirectoryChange -         not started
+    VMFileOpen -                not started
+    VMFileClose -               not started
+    VMFileRead -                not started
+    VMFileWrite -               not started
+    VMFileSeek -                not started
+    Threads Create/Delete -     NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
 
     In order to remove all system V messages: 
     1. ipcs //to see msg queue
@@ -122,11 +130,11 @@ public:
     unsigned int totalSectors32;
 }; //class BPB - BIOS Parameter Block
 
-class FAT
+/*class FAT
 {
 public:
     unsigned int FATSz;
-}; //class FAT
+}; //class FAT*/
 
 class RootEntry
 {
@@ -139,13 +147,13 @@ public:
     uint32_t DIR_FileSize;
 }; //class RootEntry
 
-class Directory
+class OpenDir
 {
 public:
-    uint8_t dirStart; //first cluster of the directory
-    uint8_t currentLocation; //the current location in the dir
-    uint8_t offset;  //how far through each cluster we have read
-}; //class Directory
+    uint16_t dirDescriptor; //cluster for the subdirectories, 0 means root
+    uint16_t pos; //the current location in the dir
+    uint16_t offset;  //how far through each cluster we have read
+}; //class OpenDir
 
 //***************************************************************************//
 //Function Prototypes, Global Variables, & Utility Functions
@@ -154,6 +162,20 @@ public:
 void pushThread(TCB*);
 void pushMutex(MB*);
 void Scheduler();
+extern TVMStatus VMDateTime(SVMDateTimeRef curdatetime);
+extern void VMStringCopy(char *dest, const char *src);
+extern void VMStringCopyN(char *dest, const char *src, int32_t n);
+extern void VMStringConcatenate(char *dest, const char *src);
+extern TVMStatus VMFileSystemValidPathName(const char *name);
+extern TVMStatus VMFileSystemIsRelativePath(const char *name);
+extern TVMStatus VMFileSystemIsAbsolutePath(const char *name);
+extern TVMStatus VMFileSystemGetAbsolutePath(char *abspath, const char *curpath, const char *destpath);
+extern TVMStatus VMFileSystemPathIsOnMount(const char *mntpt, const char *destpath);
+extern TVMStatus VMFileSystemDirectoryFromFullPath(char *dirname, const char *path);
+extern TVMStatus VMFileSystemFileFromFullPath(char *filename, const char *path);
+extern TVMStatus VMFileSystemConsolidatePath(char *fullpath, const char *dirname, const char *filename);
+extern TVMStatus VMFileSystemSimplifyPath(char *simpath, const char *abspath, const char *relpath);
+extern TVMStatus VMFileSystemRelativePath(char *relpath, const char *basepath, const char *destpath);
 typedef void (*TVMMain)(int argc, char *argv[]); //function ptr
 TVMMainEntry VMLoadModule(const char *module); //load module spec
 TMachineSignalState SigState; //global signal state to suspend and resume
@@ -167,6 +189,7 @@ vector<TCB*> threadList; //global ptr list to hold threads
 vector<MPB*> memPoolList; //global ptr list to hold memory pools
 vector<uint16_t> FATTablesList; //global vector for fat tables
 vector<RootEntry*> RootEntryList; //basically the RootEntryList
+vector<OpenDir*> dirList; //hold directories
 
 queue<TCB*> highPrio; //high priority queue
 queue<TCB*> normPrio; //normal priority queue
@@ -176,8 +199,13 @@ vector<TCB*> sleepList; //sleeping threads
 vector<MB*> mutexSleepList; //sleeping mutexs
 
 BPB *BPB = new class BPB;
-FAT *FAT = new class FAT;
+//FAT *FAT = new class FAT;
 RootEntry *ROOT = new class RootEntry;
+
+unsigned int FirstRootSector;
+unsigned int RootDirectorySectors;
+unsigned int FirstDataSector;
+unsigned int ClusterCount;
 
 void AlarmCallBack(void *param, int result)
 {
@@ -425,6 +453,32 @@ uint8_t* readSector(uint32_t sector)
     return sectorData;
 } //readSector()
 
+uint16_t* u8tou16(uint8_t *sector, uint32_t size)
+{
+    uint16_t *newArr = new uint16_t[size/2];
+    for(int i = 0; i < size/2; i += 2)
+        newArr[i/2] = sector[i+1] << 8 | sector[i];
+    return newArr;
+} //u8tou16()
+
+SVMDateTime* parseDT(uint16_t rawDate, uint16_t rawTime)
+{
+    SVMDateTime *newDT = new SVMDateTime;
+
+    newDT->DYear = ((rawDate >> 9) & 0b01111111) + 1980;
+    newDT->DMonth = (rawDate >> 5) & 0b00001111;
+    newDT->DDay = (rawDate >> 0) & 0b00011111;
+
+    newDT->DHour =   (rawTime >> 11) & 0b00011111;
+    newDT->DMinute =   (rawTime >> 5) & 0b00111111;
+    newDT->DSecond =  ((rawTime >> 0) & 0b00011111) * 2;
+    newDT->DHundredth = 0;
+
+    //cerr << (int)newDT->DMonth << "/" << (int)newDT->DDay << "/" << (int)newDT->DYear
+    //     << " " << (int)newDT->DHour << ":" << (int)newDT->DMinute << ":" << (int)newDT->DSecond << endl;
+    return newDT;
+} //parseDT()
+
 //***************************************************************************//
 //The Virtual Machine Starter!
 //***************************************************************************//
@@ -499,23 +553,20 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         BPB->totalSectors32 = bytesToUnsigned(BPB->BPB, BPB_TotSec32Offset, BPB_TotSec32);
         
         //The other variables
-        unsigned int FirstRootSector = BPB->reservedSectorCount + (BPB_NumFATs * BPB->FATSz16);
-        unsigned int RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
-        //unsigned int FirstDataSector = FirstRootSector + RootDirectorySectors;
-        //unsigned int ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
+        FirstRootSector = BPB->reservedSectorCount + (BPB_NumFATs * BPB->FATSz16);
+        RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
+        FirstDataSector = FirstRootSector + RootDirectorySectors;
+        ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
 
         //FAT Sector
-        FAT->FATSz = BPB_NumFATs * BPB->FATSz16; //2 * 17 = 34 being total fat size
-
-        for(unsigned int i = 1; i <= BPB->FATSz16; i++) //loop through primary fat here
+        //FAT->FATSz = BPB_NumFATs * BPB->FATSz16; //2 * 17 = 34 being total fat size
+        for(uint32_t i = 0; i < BPB->FATSz16; ++i)
         {
-            uint8_t *FATEntry = readSector(1);
-            uint16_t *FATS = (uint16_t*)FATEntry; //(uint16_t*)FATEntry;
-            for(unsigned int a = 0; a < 256; a++)
-            {
-                FATTablesList.push_back(FATS[a]); //read sector and store into vector
-                cout << FATS[a] << endl;
-            }
+            uint32_t sector = i + 1;
+            uint8_t *fatSector = readSector(sector); //convert to 2 byte
+
+            for(int j = 0; j < 256; j += 2)
+                FATTablesList.push_back(fatSector[j+1] << 8 | fatSector[j]); //store raw fat table
         }
 
         //ROOT Sector
@@ -525,30 +576,38 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
             uint8_t *rootSector = readSector(sector);
 
             for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
-            {      
-                if(rootSector[secOffset] == 0x00) //stop, no more entries
+            {
+                if(rootSector[secOffset] == 0x00)        // stop, no more entries
                     goto afterRoot;
-                if(rootSector[secOffset + 11] == ATTR_LONG_NAME) //skip longfile names
+                if(rootSector[secOffset + 11] == ATTR_LONG_NAME)    // skip longfile names
                     continue;
 
+                SVMDirectoryEntry *newEntry = new SVMDirectoryEntry;
+            
+                VMStringCopy(newEntry->DLongFileName, "");
+                VMStringCopyN(newEntry->DShortFileName, (char*)&rootSector[secOffset], 11);
+                newEntry->DSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
+                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
+                newEntry->DAttributes = rootSector[secOffset + 11];
+                newEntry->DCreate = *parseDT(rootSector[secOffset + 17] 
+                        << 8 | rootSector[secOffset + 16], rootSector[secOffset + 15] 
+                        << 8 | rootSector[secOffset + 14]);
+                newEntry->DAccess = *parseDT(rootSector[secOffset + 19] << 8 | rootSector[secOffset + 18], 0);
+                newEntry->DModify = *parseDT(rootSector[secOffset + 25] 
+                    << 8 | rootSector[secOffset + 24], rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22]);
+
                 RootEntry *myEntry = new RootEntry;
-                myEntry->DIR_Attr = rootSector[secOffset + 11];
-
-                for(int k = 0; k < 11; ++k)
-                    myEntry->DIR_Name[k] = rootSector[secOffset + k];
-
-                myEntry->DIR_WrtDate = rootSector[secOffset + 25] << 8 | rootSector[secOffset + 24];
-                myEntry->DIR_WrtTime = rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22];
                 myEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
                 myEntry->DIR_FileSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
-                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28]; //store filesize
+                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
             
-                RootEntryList.push_back(myEntry);
-                //cerr << secOffset / 32 << " " << (char*)myEntry->DIR_Name << " attr: " 
-                    //<< hex << (int)myEntry->DIR_Attr << dec << endl;
+                RootEntryList.push_back(myEntry); //save
+                //cerr << secOffset / 32 << " " << (char*)newEntry->DShortFileName 
+                    //<< " attr: " << hex << (int)newEntry->DAttributes << dec << endl;
+                //printf("clusLO: %04X Filesize: %d \n", myEntry->DIR_FstClusLO, myEntry->DIR_FileSize);
             } //for each entry
         } //for each sector
-        afterRoot: //just for using goto
+        afterRoot: 
 
         //END
         VMMain(argc, argv); //call to vmmain
@@ -562,35 +621,151 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
 
 TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
 {
+    MachineSuspendSignals(&SigState);
+
     if(dirname == NULL || dirdescriptor == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
     /*check dirname
-    if its "/" 
+    if its '/' (slash)
         then I create a new struct with its starting cluster = 0 and store it
     else if dirname is something else
         then create a new struct and set the starting cluster to the appropriate value and store it
     note: opening a sub directory might require that you read in from a cluster.
     We should block the calling thread in the wait state if the opening of the directory/file 
-    cannot be completely immediately.*/
+    cannot be completed immediately.*/
 
+    TVMStatus valid = VMFileSystemValidPathName(dirname);
+    if(valid != VM_STATUS_SUCCESS)
+        cerr << "Not a valid path name" << endl;
+
+    if(*dirname == '/') //dir is the root
+    {
+        OpenDir *newDir = new OpenDir;
+        newDir->dirDescriptor = *dirdescriptor = dirList.size() + 3; //return dirdes, must be > 3
+        newDir->pos = 0;
+        newDir->offset = 0;
+        dirList.push_back(newDir); //each dirdesc stored has to be unique here
+    }
+
+    else //dir is something else
+    {
+        vector<RootEntry*>::iterator itr; //look through root directory for this directory
+        for(itr = RootEntryList.begin(); itr != RootEntryList.end(); ++itr)
+        {
+            if((*itr)->DIR_Name == dirname) //if name matches
+            {
+                OpenDir *newDir = new OpenDir;
+                newDir->dirDescriptor = *dirdescriptor = dirList.size() + 3;
+                newDir->dirDescriptor = (*itr)->DIR_FstClusLO; //this dir/file is on this first cluster
+                //cerr << "location: " << hex << (*itr)->DIR_FstClusLO << endl;
+            }
+        }
+    }
+
+    MachineResumeSignals(&SigState);
     return VM_STATUS_SUCCESS;
 } //VMDirectoryOpen()
 
 TVMStatus VMDirectoryClose(int dirdescriptor)
-{return 0;} //VMDirectoryClose()
+{
+    MachineSuspendSignals(&SigState);
+
+    vector<OpenDir*>::iterator itr; //search for dirdescriptor in order to delete it
+    for(itr = dirList.begin(); itr != dirList.end(); ++itr)
+    {
+        if((*itr)->dirDescriptor == dirdescriptor)
+        {
+            dirList.erase(itr);
+            return VM_STATUS_SUCCESS; //we found it and deleted it
+        }
+    }
+
+    MachineResumeSignals(&SigState);
+    return VM_STATUS_FAILURE;
+} //VMDirectoryClose()
 
 TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
-{return 0;} //VMDirectoryRead()
+{
+    MachineSuspendSignals(&SigState);
+
+    OpenDir *currDir = NULL;
+    vector<OpenDir*>::iterator itr;
+    for(itr = dirList.begin(); itr != dirList.end(); ++itr)
+    {
+        if((*itr)->dirDescriptor == dirdescriptor)
+        {
+            currDir = *itr;
+            break;
+        }
+    }
+
+    if(currDir->pos > 6 || currDir == NULL)
+        return VM_STATUS_FAILURE;
+
+    currDir->pos++;
+    VMStringCopy(dirent->DShortFileName, "ShortFile");
+    VMStringCopy(dirent->DLongFileName, "");
+
+    SVMDateTime test;
+    dirent->DSize = 3132;
+    //VMDateTime(&test); //gives you current time and date
+    test.DYear = 2015;
+    test.DMonth = 05;
+    test.DDay = 28;
+    dirent->DModify = test;
+
+    MachineResumeSignals(&SigState);
+    return VM_STATUS_SUCCESS;
+} //VMDirectoryRead()
 
 TVMStatus VMDirectoryRewind(int dirdescriptor)
-{return 0;} //VMDirectoryRewind()
+{
+    MachineSuspendSignals(&SigState);
+    MachineResumeSignals(&SigState);
+    return VM_STATUS_SUCCESS;
+} //VMDirectoryRewind()
 
 TVMStatus VMDirectoryCurrent(char *abspath)
-{return 0;} //VMDirectoryCurrent()
+{
+    MachineSuspendSignals(&SigState);
+
+    if(abspath == NULL)
+        return VM_STATUS_ERROR_INVALID_PARAMETER;
+    VMStringCopy(abspath, "/");
+
+    MachineResumeSignals(&SigState);
+    return VM_STATUS_SUCCESS;
+} //VMDirectoryCurrent()
 
 TVMStatus VMDirectoryChange(const char *path)
-{return 0;} //VMDirectoryChange()
+{
+    MachineSuspendSignals(&SigState);
+
+    /*
+    cd .
+    cd /
+    cd ./
+    cd /home
+    */
+
+    MachineResumeSignals(&SigState);
+    return 0;
+} //VMDirectoryChange()
+
+TVMStatus VMDirectoryCreate(const char *dirname) //EXTRA CREDIT
+{
+    MachineSuspendSignals(&SigState);
+    MachineResumeSignals(&SigState);
+    return 0;
+} //VMDirectoryCreate()
+
+TVMStatus VMDirectoryUnlink(const char *path) //EXTRA CREDIT
+{
+    MachineSuspendSignals(&SigState);
+    MachineResumeSignals(&SigState);
+    return 0;
+} //VMDirectoryUnlink()
 
 //***************************************************************************//
 //MemoryPool Functions
