@@ -273,6 +273,7 @@ void idleFunction(void* TCBref)
     while(1)
     {
         MachineSuspendSignals(&SigState);
+        usleep(10000);
         MachineResumeSignals(&SigState);
     } //this is idling while we are in the idle state
 } //idleFunction()
@@ -1311,23 +1312,26 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
     char *curFile = NULL;
     for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr)
     {
-        if(strcmp((char*)(*itr)->DShortFileName, fileN) == 0)
+        if(strcmp((char*)(*itr)->DShortFileName, fileN) == 0) //check to see if file exists
         {
             curFile = (char*)(*itr)->DShortFileName;
-            //cerr << "found the filename: " << curFile << endl;
+            //cerr << "Found the filename: " << (char*)(*itr)->DShortFileName << endl;
             break;
         }
     } //loop thru direntry to find the filename
 
-    if(curFile == NULL)
+    if(curFile == NULL) //file does not exist so need to create one
     {
-        //cout << "failed to find the filename" << endl;
-        return VM_STATUS_FAILURE; //file does not exist
+        //cerr << "File not found. Created: " << fileN << endl;
+        //create file here
+        MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
     }
 
-    VMThreadSleep(10);
+    //VMThreadSleep(10);
     *filedescriptor = openFileList.size() + 3;
-    //openFileList.push_back(openFileList.size() + 3);
+    //openFileList.push_back(*filedescriptor);
     MachineResumeSignals(&SigState);
     //if(*filedescriptor < 3) //check for failure
     //    return VM_STATUS_FAILURE;
@@ -1364,6 +1368,8 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
     if(data == NULL || length == NULL) //invalid input
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
+    if(filedescriptor < 3)
+    {
     uint32_t read = 0; //to keep track of how much we have read
     char *localData = new char[*length]; //local var to copy data to/from
     void *sharedBase; //temp address to allocate memory
@@ -1394,6 +1400,7 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
     delete localData; //delete it once we are done using it
     VMMemoryPoolDeallocate(0, sharedBase);
     *length = read; //set length to what we have read
+    }
 
     MachineResumeSignals(&SigState);
     if(currentThread->fileResult < 0) //check for failure
