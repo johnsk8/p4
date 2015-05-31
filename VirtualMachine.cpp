@@ -33,6 +33,7 @@
 #include <vector>
 #include <queue>
 #include <fcntl.h>
+#include <cstring>
 #include <iostream>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
@@ -138,8 +139,8 @@ class DirEntry
     uint8_t DShortFileName[VM_FILE_SYSTEM_SFN_SIZE];
     uint8_t DAttributes;
     uint16_t DIR_FstClusLO;
-    uint16_t *DIR_Name;
     uint32_t DSize;
+    uint32_t fd;
     SVMDateTime DCreate;
     SVMDateTime DAccess;
     SVMDateTime DModify;
@@ -161,6 +162,7 @@ extern TVMStatus VMDateTime(SVMDateTimeRef curdatetime);
 extern void VMStringCopy(char *dest, const char *src);
 extern void VMStringCopyN(char *dest, const char *src, int32_t n);
 extern void VMStringConcatenate(char *dest, const char *src);
+extern uint32_t VMStringLength(const char *str);
 extern TVMStatus VMFileSystemValidPathName(const char *name);
 extern TVMStatus VMFileSystemIsRelativePath(const char *name);
 extern TVMStatus VMFileSystemIsAbsolutePath(const char *name);
@@ -181,6 +183,7 @@ int FATfd; //global file descriptor for FAT
 
 TCB *idle = new TCB; //global idle thread
 TCB *currentThread = new TCB; //global current running thread
+BPB *BPB = new class BPB;
 
 vector<MB*> mutexList; //to hold mutexs
 vector<TCB*> threadList; //global ptr list to hold threads
@@ -188,15 +191,14 @@ vector<MPB*> memPoolList; //global ptr list to hold memory pools
 vector<uint16_t> FATTablesList; //global vector for fat tables
 vector<DirEntry*> ROOT;
 vector<OpenDir*> openDirList; //hold directories
-
-queue<TCB*> highPrio; //high priority queue
-queue<TCB*> normPrio; //normal priority queue
-queue<TCB*> lowPrio; //low priority queue
+vector<DirEntry*> openFileList; 
 
 vector<TCB*> sleepList; //sleeping threads
 vector<MB*> mutexSleepList; //sleeping mutexs
 
-BPB *BPB = new class BPB;
+queue<TCB*> highPrio; //high priority queue
+queue<TCB*> normPrio; //normal priority queue
+queue<TCB*> lowPrio; //low priority queue
 
 unsigned int FirstRootSector;
 unsigned int RootDirectorySectors;
@@ -464,6 +466,22 @@ void dumpSector(uint8_t *sector, int width)
     fflush(stdout);
 } //dumpSector()
 
+void dumpBPB()
+{
+    cout << "BPB_BytsPerSec: " << BPB->bytesPerSector << endl;
+    cout << "BPB_SecPerClus: " << BPB->sectorsPerCluster << endl;
+    cout << "BPB_RsvdSecCnt: " << BPB->reservedSectorCount << endl;
+    cout << "BPB_RootEntCnt: " << BPB->rootEntityCount << endl;
+    cout << "BPB_TotSec16: " << BPB->totalSectors16 << endl;
+    cout << "BPB_FATSz16: " << BPB->FATSz16 << endl;
+    cout << "BPB_TotSec32: " << BPB->totalSectors32 << endl;
+    cout << "FATSz16: " << BPB->FATSz16 << endl;
+    cout << "FirstRootSector: " << FirstRootSector << endl;
+    cout << "RootDirectorySectors: " << RootDirectorySectors << endl;
+    cout << "FirstDataSector: " << FirstDataSector << endl;
+    cout << "ClusterCount: " << ClusterCount << endl;
+} //dumpBPB()
+
 void dumpFAT()
 {
     for(int j = 0; j < 16; ++j)
@@ -473,6 +491,16 @@ void dumpFAT()
     fflush(stdout);
 } //dumpFAT()
 
+void dumpROOT()
+{
+    int j = 0;
+    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr, ++j)
+    {
+        printf("%2d %8s attr: %02X clus: %04X size: %d\n", j, (*itr)->DShortFileName, 
+            (*itr)->DAttributes, (*itr)->DIR_FstClusLO, (*itr)->DSize);
+    }
+} //dumpROOT()
+
 SVMDateTime* parseDT(uint16_t rawDate, uint16_t rawTime)
 {
     SVMDateTime *newDT = new SVMDateTime;
@@ -481,15 +509,55 @@ SVMDateTime* parseDT(uint16_t rawDate, uint16_t rawTime)
     newDT->DMonth = (rawDate >> 5) & 0b00001111;
     newDT->DDay = (rawDate >> 0) & 0b00011111;
 
-    newDT->DHour =   (rawTime >> 11) & 0b00011111;
-    newDT->DMinute =   (rawTime >> 5) & 0b00111111;
-    newDT->DSecond =  ((rawTime >> 0) & 0b00011111) * 2;
+    newDT->DHour = (rawTime >> 11) & 0b00011111;
+    newDT->DMinute = (rawTime >> 5) & 0b00111111;
+    newDT->DSecond = ((rawTime >> 0) & 0b00011111) * 2;
     newDT->DHundredth = 0;
 
     //cerr << (int)newDT->DMonth << "/" << (int)newDT->DDay << "/" << (int)newDT->DYear
     //     << " " << (int)newDT->DHour << ":" << (int)newDT->DMinute << ":" << (int)newDT->DSecond << endl;
     return newDT;
 } //parseDT()
+
+int parseDirEnt(uint32_t sector, vector<DirEntry*> *outDirEnt)
+{
+    uint8_t *rootSector = readSector(sector); //dumpSector(rootSector, 32);
+
+    for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
+    {
+        if(rootSector[secOffset] == 0x00) //stop, no more entries
+            return -1;
+        if(rootSector[secOffset + 11] == ATTR_LONG_NAME) //skip longfile names
+            continue;
+
+        DirEntry *newEntry = new DirEntry;
+        
+        VMStringCopy((char*)newEntry->DLongFileName, "");
+        VMStringCopyN((char*)newEntry->DShortFileName, (char*)&rootSector[secOffset], 11);
+        newEntry->DSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
+            << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
+        newEntry->DAttributes = rootSector[secOffset + 11];
+        newEntry->DCreate = *parseDT(rootSector[secOffset + 17] 
+                << 8 | rootSector[secOffset + 16], rootSector[secOffset + 15] << 8 | rootSector[secOffset + 14]);
+        newEntry->DAccess = *parseDT(rootSector[secOffset + 19] << 8 | rootSector[secOffset + 18], 0);
+        newEntry->DModify = *parseDT(rootSector[secOffset + 25] 
+            << 8 | rootSector[secOffset + 24], rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22]);
+        newEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
+        outDirEnt->push_back(newEntry); //save
+
+    } //for each entry
+    return 1;
+} //parseDirEnt()
+
+void toUpper(char *str)
+{
+    do
+    {
+        if(*str >= 97 && *str <= 122)
+            *str = *str - 32;
+    }
+    while(*str++);
+} //toUpper()
 
 //***************************************************************************//
 //The Virtual Machine Starter!
@@ -548,7 +616,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
-        FATfd = currentThread->fileResult;
+        FATfd = currentThread->fileResult; //set global fd
 
         //BPB Sector
         BPB->BPB = readSector(0);
@@ -569,6 +637,7 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
         RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
         FirstDataSector = FirstRootSector + RootDirectorySectors;
         ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
+        //dumpBPB();
 
         //FAT Sector
         for(uint32_t i = 0; i < BPB->FATSz16; ++i)
@@ -579,41 +648,17 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
             for(int j = 0; j < 256; j += 2)
                 FATTablesList.push_back(fatSector[j+1] << 8 | fatSector[j]); //store raw fat table
         }
+        //dumpFAT();
 
         //ROOT Sector
         for(uint32_t i = 0; i < RootDirectorySectors; ++i)
         {
             uint32_t sector = i + FirstRootSector; //starts at
-            uint8_t *rootSector = readSector(sector);
 
-            for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
-            {
-                if(rootSector[secOffset] == 0x00) //stop, no more entries
-                    goto afterRoot;
-                if(rootSector[secOffset + 11] == ATTR_LONG_NAME) //skip longfile names
-                    continue;
-
-                DirEntry *newEntry = new DirEntry;
-                VMStringCopy((char*)newEntry->DLongFileName, "");
-                VMStringCopyN((char*)newEntry->DShortFileName, (char*)&rootSector[secOffset], 11);
-
-                newEntry->DSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
-                    << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
-                newEntry->DAttributes = rootSector[secOffset + 11];
-                newEntry->DCreate = *parseDT(rootSector[secOffset + 17] 
-                    << 8 | rootSector[secOffset + 16], rootSector[secOffset + 15] << 8 | rootSector[secOffset + 14]);
-                newEntry->DAccess = *parseDT(rootSector[secOffset + 19] << 8 | rootSector[secOffset + 18], 0);
-                newEntry->DModify = *parseDT(rootSector[secOffset + 25] 
-                    << 8 | rootSector[secOffset + 24], rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22]);
-                newEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
-                ROOT.push_back(newEntry); // save
-
-                //cerr << secOffset / 32 << " " << (char*)newEntry->DShortFileName << " attr: " 
-                    //<< hex << (int)newEntry->DAttributes << dec;
-                //printf(" clus: %04X size: %d \n", newEntry->DIR_FstClusLO, newEntry->DSize);
-            } //for each entry
-        } //for each sector
-        afterRoot: //this goes with goto
+            if(parseDirEnt(sector, &ROOT) == -1)
+                break;
+        }
+        //dumpROOT();
 
         //END
         VMMain(argc, argv); //call to vmmain
@@ -650,7 +695,7 @@ TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
         OpenDir *newDir = new OpenDir;
         newDir->entryList = ROOT;
         newDir->entryItr = newDir->entryList.begin();
-        newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3; //return dirdes
+        newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3; //return dirdes must be > 3
         openDirList.push_back(newDir);
 
         MachineResumeSignals(&SigState);
@@ -739,6 +784,23 @@ TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
 TVMStatus VMDirectoryRewind(int dirdescriptor)
 {
     MachineSuspendSignals(&SigState);
+
+    OpenDir *currDir = NULL;
+    for(vector<OpenDir*>::iterator itr = openDirList.begin(); itr != openDirList.end(); ++itr) 
+    {
+        if((*itr)->dirDescriptor == dirdescriptor)
+        {
+            currDir = *itr;
+            break;
+        }
+    } //loop to find dirdescriptor in open dir
+
+    if(currDir == NULL)
+        return VM_STATUS_FAILURE;
+
+    openDirList.push_back(currDir); //place dir ptr back to beginning of the dir
+    //cout << "rewinded" << endl;
+
     MachineResumeSignals(&SigState);
     return VM_STATUS_SUCCESS;
 } //VMDirectoryRewind()
@@ -770,7 +832,7 @@ TVMStatus VMDirectoryChange(const char *path)
     if(strcmp(abspath, "/") != 0)
         return VM_STATUS_FAILURE;
 
-    /* cd ., cd /, cd ./ */
+    /* cd ., cd /, cd ./ must succeed*/
 
     MachineResumeSignals(&SigState);
     return VM_STATUS_SUCCESS;
@@ -1209,10 +1271,70 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
 {
     MachineSuspendSignals(&SigState);
 
+    //If you're not doing extra credit, you only need to search through your root directory. 
+    //If the requested file can't be found in the root directory, you return VM_STATUS_FAILURE.
+    /*
+    use getabspath(abs, cur, path);
+    check if exists using getfilename/getdirname
+    find if exists caseinsensitive
+        check if mode == o_create
+        
+    open allcaps
+    get firstdatacluster/size
+    filepointer is offset within the file
+    vector hold open file information
+    currsize (might be updated later)
+    add to openfilevector, filedescriptor
     if(filename == NULL || filedescriptor == NULL)
-        return VM_STATUS_ERROR_INVALID_PARAMETER;
+        return VM_STATUS_ERROR_INVALID_PARAMETER;*/
 
-    MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
+    //ignore mode said prof
+    //possible flags in file.so: O_RDWR, O_RDONLY, O_CREAT, O_TRUNC, O_APPEND
+    char absPath[64], currPath[64], fileN[64];
+    VMDirectoryCurrent(currPath); //should be root '/'
+    VMFileSystemGetAbsolutePath(absPath, currPath, filename); //if filename is like /blah/yada
+    
+    if(strrchr(absPath, '/') - absPath != 0) //checks if more than one '/'
+        return VM_STATUS_FAILURE;
+
+    VMFileSystemFileFromFullPath(fileN, absPath);
+    toUpper(fileN); //make case insensitive or to uppercase if necessary
+
+    if(VMStringLength(fileN) > 11) //fail if long name
+        return VM_STATUS_FAILURE;
+
+    char padding[13]; //padding in case we need to fill spaces so it can read
+    VMStringCopyN(padding, "              ", 11 - VMStringLength(fileN));
+    VMStringConcatenate(fileN, padding);
+    //cerr << "looking for file " << fileN << " in " << "/" << endl;
+    
+    char *curFile = NULL;
+    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr)
+    {
+        if(strcmp((char*)(*itr)->DShortFileName, fileN) == 0)
+        {
+            curFile = (char*)(*itr)->DShortFileName;
+            //cerr << "found the filename: " << curFile << endl;
+            break;
+        }
+    } //loop thru direntry to find the filename
+
+    if(curFile == NULL)
+    {
+        //cout << "failed to find the filename" << endl;
+        return VM_STATUS_FAILURE; //file does not exist
+    }
+
+    VMThreadSleep(10);
+    *filedescriptor = openFileList.size() + 3;
+    //openFileList.push_back(openFileList.size() + 3);
+    MachineResumeSignals(&SigState);
+    //if(*filedescriptor < 3) //check for failure
+    //    return VM_STATUS_FAILURE;
+    //return VM_STATUS_SUCCESS;
+    return VM_STATUS_FAILURE;
+
+    /*MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
     currentThread->threadState = VM_THREAD_STATE_WAITING; //set to wait
     Scheduler(); //now we schedule threads so that we can let other threads work
     *filedescriptor = currentThread->fileResult; //fd get the file result
@@ -1220,7 +1342,7 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
     MachineResumeSignals(&SigState);
     if(currentThread->fileResult < 0) //check for failure
         return VM_STATUS_FAILURE;
-    return VM_STATUS_SUCCESS;
+    return VM_STATUS_SUCCESS;*/
 } //VMFileOpen()
 
 TVMStatus VMFileClose(int filedescriptor)
