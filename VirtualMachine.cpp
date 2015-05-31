@@ -7,15 +7,15 @@
     BPB sector -                done
     FAT sector -                done
     ROOT sector -               done
-    VMDirectoryOpen -           started
-    VMDirectoryClose -          started
-    VMDirectoryRead -           started
+    VMDirectoryOpen -           done
+    VMDirectoryClose -          done
+    VMDirectoryRead -           done
     VMDirectoryRewind -         not started
-    VMDirectoryCurrent -        started
-    VMDirectoryChange -         started
-    VMFileOpen -                not started
+    VMDirectoryCurrent -        done
+    VMDirectoryChange -         done
+    VMFileOpen -                started
     VMFileClose -               not started
-    VMFileRead -                not started
+    VMFileRead -                started
     VMFileWrite -               not started
     VMFileSeek -                not started
     Threads Create/Delete -     NEEDS TO BE FIXED, NOT ALLOCATING PROPERLY
@@ -204,6 +204,8 @@ unsigned int FirstRootSector;
 unsigned int RootDirectorySectors;
 unsigned int FirstDataSector;
 unsigned int ClusterCount;
+
+unsigned int fileReadFDOffset = 0; //global fd offset to prevent being called same again
 
 void AlarmCallBack(void *param, int result)
 {
@@ -1278,8 +1280,7 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
     use getabspath(abs, cur, path);
     check if exists using getfilename/getdirname
     find if exists caseinsensitive
-        check if mode == o_create
-        
+        check if mode == o_create  
     open allcaps
     get firstdatacluster/size
     filepointer is offset within the file
@@ -1304,7 +1305,7 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
     if(VMStringLength(fileN) > 11) //fail if long name
         return VM_STATUS_FAILURE;
 
-    char padding[13]; //padding in case we need to fill spaces so it can read
+    char padding[13]; //padding in case we need to fill spaces so it can read fine
     VMStringCopyN(padding, "              ", 11 - VMStringLength(fileN));
     VMStringConcatenate(fileN, padding);
     //cerr << "looking for file " << fileN << " in " << "/" << endl;
@@ -1323,7 +1324,6 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
     if(curFile == NULL) //file does not exist so need to create one
     {
         //cerr << "File not found. Created: " << fileN << endl;
-        //create file here
         MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
@@ -1331,12 +1331,13 @@ TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescrip
 
     //VMThreadSleep(10);
     *filedescriptor = openFileList.size() + 3;
-    //openFileList.push_back(*filedescriptor);
+    //DirEntry *fd = *filedescriptor;
+    //openFileList.push_back(fd);
     MachineResumeSignals(&SigState);
     //if(*filedescriptor < 3) //check for failure
     //    return VM_STATUS_FAILURE;
-    //return VM_STATUS_SUCCESS;
-    return VM_STATUS_FAILURE;
+    return VM_STATUS_SUCCESS;
+    //return VM_STATUS_FAILURE;
 
     /*MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
     currentThread->threadState = VM_THREAD_STATE_WAITING; //set to wait
@@ -1370,36 +1371,92 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
 
     if(filedescriptor < 3)
     {
-    uint32_t read = 0; //to keep track of how much we have read
-    char *localData = new char[*length]; //local var to copy data to/from
-    void *sharedBase; //temp address to allocate memory
+        uint32_t read = 0; //to keep track of how much we have read
+        char *localData = new char[*length]; //local var to copy data to/from
+        void *sharedBase; //temp address to allocate memory
 
-    if(*length > 512)
-    {
-        VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate with 512 bytes
-        for(uint32_t i = 0; i < *length/512; ++i)
+        if(*length > 512)
         {
-            MachineFileRead(filedescriptor, sharedBase, 512, FileCallBack, currentThread);
-            currentThread->threadState = VM_THREAD_STATE_WAITING;
-            Scheduler();
-            memcpy(&localData[i * 512], sharedBase, 512);
-            read += currentThread->fileResult;   
-        } //while we still have 512 bytes we will then read
-        VMMemoryPoolDeallocate(0, sharedBase); //deallcate once we are done
+            VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate with 512 bytes
+            for(uint32_t i = 0; i < *length/512; ++i)
+            {
+                MachineFileRead(filedescriptor, sharedBase, 512, FileCallBack, currentThread);
+                currentThread->threadState = VM_THREAD_STATE_WAITING;
+                Scheduler();
+                memcpy(&localData[i * 512], sharedBase, 512);
+                read += currentThread->fileResult;   
+            } //while we still have 512 bytes we will then read
+            VMMemoryPoolDeallocate(0, sharedBase); //deallcate once we are done
+        }
+
+        //else length < 512 or we do the remaining bytes
+        uint32_t remaining = *length - read; //for remainders of *length % 512
+        VMMemoryPoolAllocate(0, remaining, &sharedBase);
+        MachineFileRead(filedescriptor, sharedBase, remaining, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
+        memcpy(&localData[read], sharedBase, remaining);
+        read += currentThread->fileResult;
+        memcpy(data, localData, read);
+        delete localData; //delete it once we are done using it
+        VMMemoryPoolDeallocate(0, sharedBase);
+        *length = read; //set length to what we have read
+
+        fileReadFDOffset = fileReadFDOffset + filedescriptor;
+        cout << "fd < 3 offset: " << fileReadFDOffset << endl;
     }
 
-    //else length < 512 or we do the remaining bytes
-    uint32_t remaining = *length - read; //for remainders of *length % 512
-    VMMemoryPoolAllocate(0, remaining, &sharedBase);
-    MachineFileRead(filedescriptor, sharedBase, remaining, FileCallBack, currentThread);
-    currentThread->threadState = VM_THREAD_STATE_WAITING;
-    Scheduler();
-    memcpy(&localData[read], sharedBase, remaining);
-    read += currentThread->fileResult;
-    memcpy(data, localData, read);
-    delete localData; //delete it once we are done using it
-    VMMemoryPoolDeallocate(0, sharedBase);
-    *length = read; //set length to what we have read
+    else //fd is >= 3 so need to do clustering
+    {
+        uint16_t curCluster = 0;
+        for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr)
+        {
+            if((*itr)->DIR_FstClusLO)
+            {
+                curCluster = (*itr)->DIR_FstClusLO; //get the first cluster lo
+                break;
+            }
+        }
+
+        //cout << "first clust low: " << curCluster << endl; //should be 2
+        //MachineFileSeek(filedescriptor, offset, whence, FileCallBack, currentThread);
+        uint32_t read = 0; //to keep track of how much we have read
+        char *localData = new char[*length]; //local var to copy data to/from
+        void *sharedBase; //temp address to allocate memory
+
+        MachineFileSeek(fileReadFDOffset, curCluster, 0, FileCallBack, currentThread); //seek for cluster
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
+
+        if(*length > 512)
+        {
+            VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate with 512 bytes
+            for(uint32_t i = 0; i < *length/512; ++i)
+            {
+                MachineFileRead(fileReadFDOffset, sharedBase, 512, FileCallBack, currentThread);
+                currentThread->threadState = VM_THREAD_STATE_WAITING;
+                Scheduler();
+                memcpy(&localData[i * 512], sharedBase, 512);
+                read += currentThread->fileResult;   
+            } //while we still have 512 bytes we will then read
+            VMMemoryPoolDeallocate(0, sharedBase); //deallcate once we are done
+        }
+
+        //else length < 512 or we do the remaining bytes
+        uint32_t remaining = *length - read;
+        VMMemoryPoolAllocate(0, remaining, &sharedBase);
+        MachineFileRead(fileReadFDOffset, sharedBase, remaining, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler();
+        memcpy(&localData[read], sharedBase, remaining);
+        read += currentThread->fileResult;
+        memcpy(data, localData, read);
+        delete localData; //delete it once we are done using it
+        VMMemoryPoolDeallocate(0, sharedBase);
+        *length = read; //set length to what we have read
+
+        fileReadFDOffset = fileReadFDOffset + filedescriptor;
+        cout << "fd >= 3 offset: " << fileReadFDOffset << endl;
     }
 
     MachineResumeSignals(&SigState);
