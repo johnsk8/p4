@@ -141,6 +141,7 @@ class DirEntry
     uint16_t DIR_FstClusLO;
     uint32_t DSize;
     uint32_t fd;
+    //uint32_t fdOffset; //global fd offset to prevent being called same again
     SVMDateTime DCreate;
     SVMDateTime DAccess;
     SVMDateTime DModify;
@@ -179,7 +180,7 @@ void Scheduler();
 typedef void (*TVMMain)(int argc, char *argv[]); //function ptr
 TVMMainEntry VMLoadModule(const char *module); //load module spec
 TMachineSignalState SigState; //global signal state to suspend and resume
-int FATfd; //global file descriptor for FAT
+unsigned int FATfd; //global file descriptor for FAT
 
 TCB *idle = new TCB; //global idle thread
 TCB *currentThread = new TCB; //global current running thread
@@ -205,7 +206,7 @@ unsigned int RootDirectorySectors;
 unsigned int FirstDataSector;
 unsigned int ClusterCount;
 
-unsigned int fileReadFDOffset = 0; //global fd offset to prevent being called same again
+//uint32_t fileReadFDOffset; //global fd offset to prevent being called same again
 
 void AlarmCallBack(void *param, int result)
 {
@@ -1402,8 +1403,9 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
         VMMemoryPoolDeallocate(0, sharedBase);
         *length = read; //set length to what we have read
 
-        fileReadFDOffset = fileReadFDOffset + filedescriptor;
-        cout << "fd < 3 offset: " << fileReadFDOffset << endl;
+        FATfd += filedescriptor;
+        //fileReadFDOffset = fileReadFDOffset + filedescriptor;
+        //cout << "fd < 3 offset: " << fileReadFDOffset << endl;
     }
 
     else //fd is >= 3 so need to do clustering
@@ -1417,14 +1419,14 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
                 break;
             }
         }
-
         //cout << "first clust low: " << curCluster << endl; //should be 2
-        //MachineFileSeek(filedescriptor, offset, whence, FileCallBack, currentThread);
+        
+        //need to convert curCluster to bytes
         uint32_t read = 0; //to keep track of how much we have read
         char *localData = new char[*length]; //local var to copy data to/from
         void *sharedBase; //temp address to allocate memory
 
-        MachineFileSeek(fileReadFDOffset, curCluster, 0, FileCallBack, currentThread); //seek for cluster
+        MachineFileSeek(FATfd, curCluster, 0, FileCallBack, currentThread); //seek for cluster
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
 
@@ -1433,7 +1435,7 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
             VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate with 512 bytes
             for(uint32_t i = 0; i < *length/512; ++i)
             {
-                MachineFileRead(fileReadFDOffset, sharedBase, 512, FileCallBack, currentThread);
+                MachineFileRead(FATfd, sharedBase, 512, FileCallBack, currentThread);
                 currentThread->threadState = VM_THREAD_STATE_WAITING;
                 Scheduler();
                 memcpy(&localData[i * 512], sharedBase, 512);
@@ -1445,7 +1447,7 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
         //else length < 512 or we do the remaining bytes
         uint32_t remaining = *length - read;
         VMMemoryPoolAllocate(0, remaining, &sharedBase);
-        MachineFileRead(fileReadFDOffset, sharedBase, remaining, FileCallBack, currentThread);
+        MachineFileRead(FATfd, sharedBase, remaining, FileCallBack, currentThread);
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
         memcpy(&localData[read], sharedBase, remaining);
@@ -1455,8 +1457,9 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
         VMMemoryPoolDeallocate(0, sharedBase);
         *length = read; //set length to what we have read
 
-        fileReadFDOffset = fileReadFDOffset + filedescriptor;
-        cout << "fd >= 3 offset: " << fileReadFDOffset << endl;
+        FATfd += filedescriptor; //update fd
+        //fileReadFDOffset = fileReadFDOffset + filedescriptor;
+        //cout << "fd >= 3 offset: " << fileReadFDOffset << endl;
     }
 
     MachineResumeSignals(&SigState);
