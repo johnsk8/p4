@@ -1381,10 +1381,6 @@ TVMStatus VMFileClose(int filedescriptor)
 {
     MachineSuspendSignals(&SigState);
 
-    MachineFileClose(filedescriptor, FileCallBack, currentThread);
-    currentThread->threadState = VM_THREAD_STATE_WAITING;
-    Scheduler(); //now we schedule our threads
-
     //update the size in dir entry, access date, write date/time
     DirEntry *myFile = new DirEntry;
     for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
@@ -1398,8 +1394,22 @@ TVMStatus VMFileClose(int filedescriptor)
     }
 
     VMDateTime(&myFile->DModify); //update date/time modified
-    //must do writing from loaded clusters here
+    //must do writing from loaded clusters here call MachineFileWrite
 
+    /*for(map<uint32_t,uint8_t*>::iterator itr = loadedClus.begin(); itr != loadedClus.end(); ++itr)
+    {
+        void *sharedBase;
+        VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate
+        memcpy(sharedBase, itr->second, 512); //mem copy from data to shared
+
+        MachineFileWrite(myFile->fd, sharedBase, 512, FileCallBack, currentThread);
+        currentThread->threadState = VM_THREAD_STATE_WAITING;
+        Scheduler(); //now we schedule our threads
+    } //loop thru to write all the data*/
+
+    MachineFileClose(filedescriptor, FileCallBack, currentThread);
+    currentThread->threadState = VM_THREAD_STATE_WAITING;
+    Scheduler(); //now we schedule our threads
 
     MachineResumeSignals(&SigState);
     return VM_STATUS_SUCCESS;
@@ -1551,57 +1561,58 @@ TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
         *length = written; //set length to what we have written
     } //fd < 3 case
 
-    else //fd >= 3
+    else //fd >= 3 so must do clustering
     {
         DirEntry *openFile = NULL;
-            for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
+        for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
+        {
+            if((*itr)->fd == filedescriptor)
             {
-                if((*itr)->fd == filedescriptor)
-                {
-                    openFile = (*itr);
-                    break;
-                }
+                openFile = (*itr);
+                break;
             }
+        }
 
-            if(openFile == NULL) //fail if file doesnt exist
-                return VM_STATUS_FAILURE;
+        if(openFile == NULL) //fail if file doesnt exist
+            return VM_STATUS_FAILURE;
 
-            int written = openFile->fdOffset; //offset will be -1 if EOF
-            if(written == -1)
+        int written = openFile->fdOffset; //offset will be -1 if EOF
+        if(written == -1)
+        {
+            openFile->fdOffset = 0;
+            return  VM_STATUS_FAILURE;
+        }
+
+        uint32_t curCluster = openFile->DIR_FstClusLO + written;
+        char *localData = new char[*length]; //local var to copy data to/from
+        memcpy(localData, data, *length); //we copy first
+        //cout << "cluster: " << curCluster << endl;
+
+        uint8_t *localClus = readCluster(curCluster);
+        //dumpCluster(localClus, 32);
+
+        if(*length > 1024)
+        {
+            for(uint32_t i = 0; i < *length/1024; ++i)
             {
-                openFile->fdOffset = 0;
-                return  VM_STATUS_FAILURE;
+                if(!loadedClus.count(curCluster)) //if not previously loaded, load in
+                    loadedClus[curCluster] = readCluster(curCluster);
+
+                memcpy(&localClus[i * 1024], &localData[i * 1024], 1024);
+                written += 1024;
             }
+        }
 
-            uint32_t curCluster = openFile->DIR_FstClusLO + written;
-            char *localData = new char[*length]; //local var to copy data to/from
-            memcpy(localData, data, *length); //we copy first
-            //cout << "cluster: " << curCluster << endl;
+        uint32_t remaining = *length - written;
 
-            uint8_t *localClus = readCluster(curCluster);
-            dumpCluster(localClus, 32);
+        if(!loadedClus.count(curCluster)) //if not previously loaded, load in
+            loadedClus[curCluster] = readCluster(curCluster); //inserts into map <clus pos, data>
 
-            if(*length > 1024)
-            {
-                for(uint32_t i = 0; i < *length/1024; ++i)
-                {
-                    if(!loadedClus.count(curCluster))    //if not previously loaded, load in
-                        loadedClus[curCluster] = readCluster(curCluster);
-                    memcpy(&localClus[i * 1024], &localData[i * 1024], 1024);
-                    written += 1024;
-                }
-            }
-
-            uint32_t remaining = *length - written;
-
-            if(!loadedClus.count(curCluster)) //if not previously loaded, load in
-                loadedClus[curCluster] = readCluster(curCluster); //inserts into map <clus pos, data>
-
-            memcpy(&localClus[written], &localData[written], remaining);
-            written += remaining;
-            //dumpCluster(localClus, 32);
-            *length = written; //set length to what we have written
-            openFile->fdOffset += written / 1024;
+        memcpy(&localClus[written], &localData[written], remaining);
+        written += remaining;
+        //dumpCluster(localClus, 32);
+        *length = written; //set length to what we have written
+        openFile->fdOffset += written / 1024;
     } //fd >= 3 case
 
     MachineResumeSignals(&SigState);
