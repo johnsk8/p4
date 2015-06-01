@@ -15,8 +15,8 @@
     VMDirectoryChange -         done
     VMFileOpen -                done
     VMFileClose -               started
-    VMFileRead -                started
-    VMFileWrite -               started
+    VMFileRead -                done
+    VMFileWrite -               done
     VMFileSeek -                not started
     Thread Create/Delete -     allocating shared mem
 
@@ -31,55 +31,48 @@
 #include "VirtualMachine.h"
 #include "Machine.h"
 #include <vector>
+#include <map>
 #include <queue>
 #include <fcntl.h>
-#include <cstring>
-#include <map>
 #include <iostream>
+#include <string.h>
+#include <cstdio>
 extern const TVMMemoryPoolID VM_MEMORY_POOL_ID_SYSTEM = 1;
 using namespace std;
 
-//BPB - Given
+//BPB
+#define BPB_Size 36
+#define BPB_NumFATS 2
+#define ROOT_EntSz 32
 #define BPB_BytsPerSec 2
 #define BPB_BytsPerSecOffset 11
 #define BPB_SecPerClus 1
 #define BPB_SecPerClusOffset 13
 #define BPB_RsvdSecCnt 2
 #define BPB_RsvdSecCntOffset 14
-#define BPB_NumFATs 2
 #define BPB_RootEntCnt 2
 #define BPB_RootEntCntOffset 17
 #define BPB_TotSec16 2
 #define BPB_TotSec16Offset 19
-#define BPB_Media 1
-#define BPB_MediaOffset 21
 #define BPB_FATSz16 2
 #define BPB_FATSz16Offset 22
-#define BPB_SecPerTrk 2
-#define BPB_SecPerTrkOffset 24
-#define BPB_NumHeads 2
-#define BPB_NumHeadsOffset 26
-#define BPB_HiddSec 4
-#define BPB_HiddSecOffset 28
 #define BPB_TotSec32 4
 #define BPB_TotSec32Offset 32
-#define ROOT_EntSz 32
 
-//DIR - Given
-#define ATTR_READ_ONLY 0x01
-#define ATTR_HIDDEN 0x02
-#define ATTR_SYSTEM 0x04
-#define ATTR_VOLUME_ID 0x08
-#define ATTR_DIRECTORY 0x10
-#define ATTR_ARCHIVE 0x20
-#define ATTR_LONG_NAME 0x0F //(ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID)
+//DIR
+#define ATTR_READ_ONLY      0x01
+#define ATTR_HIDDEN         0x02
+#define ATTR_SYSTEM         0x04
+#define ATTR_VOLUME_ID      0x08
+#define ATTR_DIRECTORY      0x10
+#define ATTR_ARCHIVE        0x20
+#define ATTR_LONG_NAME      0x0F //(ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID)
 
 extern "C"
 {
 //***************************************************************************//
 //Classes
 //***************************************************************************//
-
 class TCB
 {
     public:
@@ -116,55 +109,59 @@ class MPB
     uint8_t *spaceMap; //keep track of sizes and allocated spaces
 }; //class MPB - Memory Pool Block
 
-class BPB
-{
-    public:
+class BPB {
+public:
     uint8_t *BPB; //first 512 bytes in first sector
+    unsigned int FATSz;
+    unsigned int ROOTSz;
     unsigned int bytesPerSector;
     unsigned int sectorsPerCluster;
     unsigned int reservedSectorCount;
     unsigned int rootEntityCount;
     unsigned int totalSectors16;
-    unsigned int media;
     unsigned int FATSz16;
-    unsigned int sectorsPerTrack;
-    unsigned int numberHeads;
-    unsigned int hiddenSectors;
     unsigned int totalSectors32;
-}; //class BPB - BIOS Parameter Block
+}; //class BPB
 
-class DirEntry
-{
-    public:
+class DirEntry {
+public:
     uint8_t DLongFileName[VM_FILE_SYSTEM_MAX_PATH];
     uint8_t DShortFileName[VM_FILE_SYSTEM_SFN_SIZE];
     uint8_t DAttributes;
     uint16_t DIR_FstClusLO;
     uint32_t DSize;
-    uint32_t fd;
-    uint32_t fdOffset;
     SVMDateTime DCreate;
     SVMDateTime DAccess;
     SVMDateTime DModify;
-}; //class DirEntry
+    uint32_t fd;
+    int fdOffset;
+};
 
-class OpenDir
-{
-    public:
+class OpenDir {
+public:
     vector<DirEntry*> entryList;
     vector<DirEntry*>::iterator entryItr;
     uint16_t dirDescriptor;
-}; //class OpenDir
+};
 
-//***************************************************************************//
-//Function Prototypes, Global Variables, & Utility Functions
-//***************************************************************************//
 
+/*typedef struct{
+    unsigned int DYear;
+    unsigned char DMonth;
+    unsigned char DDay;
+    unsigned char DHour;
+    unsigned char DMinute;
+    unsigned char DSecond;
+    unsigned char DHundredth;
+} SVMDateTime, *SVMDateTimeRef; */
+
+        
+    //VirtualMachineUtils.c Functions
 extern TVMStatus VMDateTime(SVMDateTimeRef curdatetime);
+extern uint32_t VMStringLength(const char *str);
 extern void VMStringCopy(char *dest, const char *src);
 extern void VMStringCopyN(char *dest, const char *src, int32_t n);
 extern void VMStringConcatenate(char *dest, const char *src);
-extern uint32_t VMStringLength(const char *str);
 extern TVMStatus VMFileSystemValidPathName(const char *name);
 extern TVMStatus VMFileSystemIsRelativePath(const char *name);
 extern TVMStatus VMFileSystemIsAbsolutePath(const char *name);
@@ -175,34 +172,40 @@ extern TVMStatus VMFileSystemFileFromFullPath(char *filename, const char *path);
 extern TVMStatus VMFileSystemConsolidatePath(char *fullpath, const char *dirname, const char *filename);
 extern TVMStatus VMFileSystemSimplifyPath(char *simpath, const char *abspath, const char *relpath);
 extern TVMStatus VMFileSystemRelativePath(char *relpath, const char *basepath, const char *destpath);
+
+
+//***************************************************************************//
+//Global Variables & Utility Functions
+//***************************************************************************//
+
 void pushThread(TCB*);
 void pushMutex(MB*);
 void Scheduler();
 typedef void (*TVMMain)(int argc, char *argv[]); //function ptr
 TVMMainEntry VMLoadModule(const char *module); //load module spec
-TMachineSignalState SigState; //global signal state to suspend and resume
-unsigned int FATfd; //global file descriptor for FAT
 
 TCB *idle = new TCB; //global idle thread
 TCB *currentThread = new TCB; //global current running thread
-BPB *BPB = new class BPB;
 
 vector<MB*> mutexList; //to hold mutexs
 vector<TCB*> threadList; //global ptr list to hold threads
 vector<MPB*> memPoolList; //global ptr list to hold memory pools
-vector<uint16_t> FATTablesList; //global vector for fat tables
-vector<DirEntry*> ROOT; //entry list for root
-vector<OpenDir*> openDirList; //hold directories
-vector<DirEntry*> openFileList; //hold the opened files
-map<uint32_t, uint8_t*> loadedClus; //holds clus pos and data
-
-vector<TCB*> sleepList; //sleeping threads
-vector<MB*> mutexSleepList; //sleeping mutexs
+vector<uint16_t> FATTable; //global vector for fat tables
 
 queue<TCB*> highPrio; //high priority queue
 queue<TCB*> normPrio; //normal priority queue
 queue<TCB*> lowPrio; //low priority queue
 
+vector<TCB*> sleepList; //sleeping threads
+vector<MB*> mutexSleepList; //sleeping mutexs
+
+vector<DirEntry*> ROOT;
+vector<OpenDir*> openDirList;
+vector<DirEntry*> openFileList;
+map<uint32_t, uint8_t*> loadedClus;
+
+int FATfd;
+BPB *BPB = new class BPB; //global fat var
 unsigned int FirstRootSector;
 unsigned int RootDirectorySectors;
 unsigned int FirstDataSector;
@@ -271,13 +274,13 @@ void Skeleton(void* param)
 
 void idleFunction(void* TCBref)
 {
-    TMachineSignalState SigState; //a state
+    TMachineSignalState OldState; //a state
     MachineEnableSignals(); //start the signals
     while(1)
     {
-        MachineSuspendSignals(&SigState);
+        MachineSuspendSignals(&OldState);
         usleep(10000);
-        MachineResumeSignals(&SigState);
+        MachineResumeSignals(&OldState);
     } //this is idling while we are in the idle state
 } //idleFunction()
 
@@ -427,20 +430,10 @@ void scheduleMutex(MB *myMutex)
     } //set owner to prior mutex 
 } //scheduleMutex()
 
-unsigned int bytesToUnsigned(uint8_t* BPB, unsigned int offset, unsigned int size)
-{
-    unsigned int unsignedAccum = 0;
-    for(unsigned int i = 0; i < size; i++) //loop through until we reached size and convert to uints
-        unsignedAccum += ((unsigned int)BPB[offset + i] << (i * 8)); //bit shifting
-    return unsignedAccum;
-} //bytesToUnsigned()
-
-uint8_t* readSector(uint32_t sector)
-{
+uint8_t* readSector(uint32_t sector){
     void* sharedMem;
     uint8_t* sectorData;
     VMMemoryPoolAllocate(0, 512, &sharedMem);
-
     MachineFileSeek(FATfd, sector * 512, 0, FileCallBack, currentThread);
     currentThread->threadState = VM_THREAD_STATE_WAITING;
     Scheduler();
@@ -449,43 +442,70 @@ uint8_t* readSector(uint32_t sector)
     currentThread->threadState = VM_THREAD_STATE_WAITING;
     Scheduler();
 
+    /*
+        for(int j = 0; j < 32; ++j) printf("%2d ", j); printf("\n");
+        for(int j = 0; j < 512; ++j) printf("%02X ", ((uint8_t *)sharedMem)[j]);
+    */
+
     sectorData = (uint8_t*)sharedMem;
 
     VMMemoryPoolDeallocate(0, &sharedMem);
     return sectorData;
-} //readSector()
+}
 
-uint8_t* readCluster(uint32_t dataCluster)
-{
+uint8_t* readCluster(uint32_t dataCluster) {
     uint32_t sector = FirstDataSector + (dataCluster - 2) * 2;
-    //cout << sector << endl;
     uint8_t *clusterData = new uint8_t[1024];
 
     memcpy(clusterData, readSector(sector), 512);
     memcpy(&clusterData[512], readSector(sector + 512), 512);
 
     return clusterData;
-} //readCluster()
+}
 
-uint16_t* u8tou16(uint8_t *sector, uint32_t size)
-{
+uint16_t* u8tou16(uint8_t *sector, uint32_t size){
     uint16_t *newArr = new uint16_t[size/2];
-    for(int i = 0; i < size/2; i += 2)
+    for(uint32_t i = 0; i < size/2; i += 2)
         newArr[i/2] = sector[i+1] << 8 | sector[i];
+
     return newArr;
-} //u8tou16()
+}
 
-void dumpSector(uint8_t *sector, int width)
-{
-    for(int j = 0; j < width; ++j)
-        printf("%2d ", j); printf("\n");
-    for(int j = 0; j < 512; ++j)
-        printf("%02X ", sector[j]);
-    fflush(stdout);
-} //dumpSector()
+void toUpper(char *str) {
+    do {
+        if(*str >= 97 && *str <= 122)
+            *str = *str - 32;
+    } while(*str++);
+}
 
-void dumpBPB()
+SVMDateTime* parseDT(uint16_t rawDate, uint16_t rawTime) {
+    SVMDateTime *newDT = new SVMDateTime;
+
+    newDT->DYear    =  ((rawDate >> 9) & 0b01111111) + 1980;
+    newDT->DMonth   =   (rawDate >> 5) & 0b00001111;
+    newDT->DDay     =   (rawDate >> 0) & 0b00011111;
+
+    newDT->DHour        =   (rawTime >> 11) & 0b00011111;
+    newDT->DMinute      =   (rawTime >> 5)  & 0b00111111;
+    newDT->DSecond      =  ((rawTime >> 0)  & 0b00011111) * 2;
+    newDT->DHundredth   =   0;
+
+    //cerr << (int)newDT->DMonth << "/" << (int)newDT->DDay << "/" << (int)newDT->DYear
+    //     << " " << (int)newDT->DHour << ":" << (int)newDT->DMinute << ":" << (int)newDT->DSecond << endl;
+
+    return newDT;
+} // parseDT
+
+unsigned int bytesToUnsigned(uint8_t* BPB, uint16_t offset, uint16_t size)
 {
+    unsigned int unsignedAccum = 0;
+    for(unsigned int i = 0; i < size; i++)
+        unsignedAccum += ((unsigned int)BPB[offset + i] << (i*8));
+
+    return unsignedAccum;
+} //bytesToUngned()
+
+void dumpBPB() {
     cout << "BPB_BytsPerSec: " << BPB->bytesPerSector << endl;
     cout << "BPB_SecPerClus: " << BPB->sectorsPerCluster << endl;
     cout << "BPB_RsvdSecCnt: " << BPB->reservedSectorCount << endl;
@@ -493,97 +513,69 @@ void dumpBPB()
     cout << "BPB_TotSec16: " << BPB->totalSectors16 << endl;
     cout << "BPB_FATSz16: " << BPB->FATSz16 << endl;
     cout << "BPB_TotSec32: " << BPB->totalSectors32 << endl;
-    cout << "FATSz16: " << BPB->FATSz16 << endl;
+    cout << "FATSz16: " << BPB->FATSz << endl;
+    cout << "ROOTSz16: " << BPB->ROOTSz << endl;
     cout << "FirstRootSector: " << FirstRootSector << endl;
     cout << "RootDirectorySectors: " << RootDirectorySectors << endl;
     cout << "FirstDataSector: " << FirstDataSector << endl;
     cout << "ClusterCount: " << ClusterCount << endl;
-} //dumpBPB()
+} // dumpBPB()
 
-void dumpFAT()
-{
-    for(int j = 0; j < 16; ++j)
-        printf("%4d ", j); printf("\n");
-    for(int j = 0; j < 256; ++j)
-        printf("%04X ", FATTablesList[j]);
+void dumpSector(uint8_t *sector, int width) {
+    for(int j = 0; j < width; ++j) fprintf(stderr, "%2d ", j); printf("\n");
+    for(int j = 0; j < 512; ++j) fprintf(stderr, "%02X ", sector[j]);
+}
+
+void dumpCluster(uint8_t *cluster, int width) {
+    for(int j = 0; j < width; ++j) fprintf(stderr, "%2d ", j); printf("\n");
+    for(int j = 0; j < 1024; ++j) fprintf(stderr, "%02X ", cluster[j]);
+}
+
+void dumpFAT() {    // dump FAT table
+    for(int j = 0; j < 16; ++j) printf("%4d ", j); printf("\n");
+    for(int j = 0; j < 256; ++j) printf("%04X ", FATTable[j]);
     fflush(stdout);
-} //dumpFAT()
+} // dumpFAT()
 
-void dumpROOT()
-{
+void dumpROOT() {
     int j = 0;
-    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr, ++j)
-    {
-        printf("%2d %8s attr: %02X clus: %04X size: %d\n", j, (*itr)->DShortFileName, 
-            (*itr)->DAttributes, (*itr)->DIR_FstClusLO, (*itr)->DSize);
+    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr, ++j) {
+        printf("%2d %8s attr: %02X clus: %04X size: %d\n", j, (*itr)->DShortFileName, (*itr)->DAttributes, 
+            (*itr)->DIR_FstClusLO, (*itr)->DSize);
     }
-} //dumpROOT()
+}
 
-void dumpCluster(uint8_t *cluster, int width)
-{
-    for(int j = 0; j < width; ++j)
-        fprintf(stderr, "%2d ", j); printf("\n");
-    for(int j = 0; j < 1024; ++j)
-        fprintf(stderr, "%02X ", cluster[j]);
-} //dumpCluster()
+int parseDirEnt(uint32_t sector, vector<DirEntry*> *outDirEnt) {
+    uint8_t *rootSector = readSector(sector);   //dumpSector(rootSector, 32);
 
-SVMDateTime* parseDT(uint16_t rawDate, uint16_t rawTime)
-{
-    SVMDateTime *newDT = new SVMDateTime;
-
-    newDT->DYear = ((rawDate >> 9) & 0b01111111) + 1980;
-    newDT->DMonth = (rawDate >> 5) & 0b00001111;
-    newDT->DDay = (rawDate >> 0) & 0b00011111;
-
-    newDT->DHour = (rawTime >> 11) & 0b00011111;
-    newDT->DMinute = (rawTime >> 5) & 0b00111111;
-    newDT->DSecond = ((rawTime >> 0) & 0b00011111) * 2;
-    newDT->DHundredth = 0;
-
-    //cerr << (int)newDT->DMonth << "/" << (int)newDT->DDay << "/" << (int)newDT->DYear
-    //     << " " << (int)newDT->DHour << ":" << (int)newDT->DMinute << ":" << (int)newDT->DSecond << endl;
-    return newDT;
-} //parseDT()
-
-int parseDirEnt(uint32_t sector, vector<DirEntry*> *outDirEnt)
-{
-    uint8_t *rootSector = readSector(sector); //dumpSector(rootSector, 32);
-
-    for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) //16 entries per sector
-    {
-        if(rootSector[secOffset] == 0x00) //stop, no more entries
+    for(uint32_t secOffset = 0; secOffset < 512; secOffset += 32) {      // 16 entries per sector
+        if(rootSector[secOffset] == 0x00)        // stop, no more entries
             return -1;
-        if(rootSector[secOffset + 11] == ATTR_LONG_NAME) //skip longfile names
+        if(rootSector[secOffset + 11] == ATTR_LONG_NAME)    // skip longfile names
             continue;
 
         DirEntry *newEntry = new DirEntry;
         
         VMStringCopy((char*)newEntry->DLongFileName, "");
-        VMStringCopyN((char*)newEntry->DShortFileName, (char*)&rootSector[secOffset], 11);
+        VMStringCopyN((char*)newEntry->DShortFileName, (char*)&rootSector[secOffset], 11);  // store filename (short)
         newEntry->DSize = rootSector[secOffset + 31] << 24 | rootSector[secOffset + 30] 
-            << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
-        newEntry->DAttributes = rootSector[secOffset + 11];
+        << 16 | rootSector[secOffset + 29] << 8 | rootSector[secOffset + 28];
+        newEntry->DAttributes = rootSector[secOffset + 11];        // store attribute
+        newEntry->DCreate.DHundredth = rootSector[secOffset + 13];
         newEntry->DCreate = *parseDT(rootSector[secOffset + 17] 
-                << 8 | rootSector[secOffset + 16], rootSector[secOffset + 15] << 8 | rootSector[secOffset + 14]);
+            << 8 | rootSector[secOffset + 16], rootSector[secOffset + 15] << 8 | rootSector[secOffset + 14]);
         newEntry->DAccess = *parseDT(rootSector[secOffset + 19] << 8 | rootSector[secOffset + 18], 0);
         newEntry->DModify = *parseDT(rootSector[secOffset + 25] 
             << 8 | rootSector[secOffset + 24], rootSector[secOffset + 23] << 8 | rootSector[secOffset + 22]);
-        newEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];
-        outDirEnt->push_back(newEntry); //save
 
-    } //for each entry
+        newEntry->DIR_FstClusLO = rootSector[secOffset + 27] << 8 | rootSector[secOffset + 26];  // store fstClusLO
+
+        outDirEnt->push_back(newEntry);    // save
+
+    } // for each entry
+
     return 1;
-} //parseDirEnt()
-
-void toUpper(char *str)
-{
-    do
-    {
-        if(*str >= 97 && *str <= 122)
-            *str = *str - 32;
-    }
-    while(*str++);
-} //toUpper()
+}
 
 //***************************************************************************//
 //The Virtual Machine Starter!
@@ -598,98 +590,98 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
     MachineRequestAlarm(usec, (TMachineAlarmCallback)AlarmCallBack, NULL); //starts the alarm tick
     MachineEnableSignals(); //start the signals
 
+
     if(VMMain == NULL) //fail to load module check
         return VM_STATUS_FAILURE;
 
-    else //load successful
-    {
-        //THREADS START
-        uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
-        idle->threadID = 0; //idle thread first in array of threads
-        idle->threadState = VM_THREAD_STATE_DEAD;
-        idle->threadPrior = VM_THREAD_PRIORITY_LOW;
-        idle->threadEntry = idleFunction;
-        idle->base = stack;
-        MachineContextCreate(&(idle)->SMC, Skeleton, NULL, stack, 0x100000); //context for idle
+    //THREADS
+    uint8_t *stack = new uint8_t[0x100000]; //array of threads treated as a stack
+    idle->threadID = 0; //idle thread first in array of threads
+    idle->threadState = VM_THREAD_STATE_DEAD;
+    idle->threadPrior = VM_THREAD_PRIORITY_LOW;
+    idle->threadEntry = idleFunction;
+    idle->base = stack;
+    MachineContextCreate(&(idle)->SMC, Skeleton, NULL, stack, 0x100000); //context for idle
 
-        TCB *VMMainTCB = new TCB; //start main thread
-        VMMainTCB->threadID = 1; //main is second in array of threads
-        VMMainTCB->threadPrior = VM_THREAD_PRIORITY_NORMAL;
-        VMMainTCB->threadState = VM_THREAD_STATE_RUNNING;
-        currentThread = VMMainTCB; //current thread is now main
+    TCB *VMMainTCB = new TCB; //start main thread
+    VMMainTCB->threadID = 1; //main is second in array of threads
+    VMMainTCB->threadPrior = VM_THREAD_PRIORITY_NORMAL;
+    VMMainTCB->threadState = VM_THREAD_STATE_RUNNING;
+    currentThread = VMMainTCB; //current thread is now main
 
-        threadList.push_back(idle); //push into pos 0
-        threadList.push_back(VMMainTCB); //push into pos 1
+    threadList.push_back(idle); //push into pos 0
+    threadList.push_back(VMMainTCB); //push into pos 1
 
-        //MEMORY POOLS START
-        MPB *sharedMPB = new MPB;
-        sharedMPB->MPsize = sharedsize; 
-        sharedMPB->MPid = 0; //shared pool id is 0
-        sharedMPB->base = sharedBase; //allocate for sharedsize
-        sharedMPB->spaceMap = new uint8_t[sharedsize/64]; //NOT DONE
+    //MEMORY POOLS
+    MPB *sharedMPB = new MPB;
+    sharedMPB->MPsize = sharedsize; 
+    sharedMPB->MPid = 0; //shared pool id is 0
+    sharedMPB->base = sharedBase; //allocate for sharedsize
+    sharedMPB->spaceMap = new uint8_t[sharedsize/64]; //NOT DONE
 
-        uint8_t *base = new uint8_t[heapsize];
-        MPB *VMMainMPB = new MPB;
-        VMMainMPB->MPsize = heapsize; 
-        VMMainMPB->MPid = VM_MEMORY_POOL_ID_SYSTEM; //mem pool id is 1
-        VMMainMPB->base = base; //allocate for heapsize
-        VMMainMPB->spaceMap = new uint8_t[heapsize/64 + (heapsize % 64 > 0)]; //map creation
+    uint8_t *base = new uint8_t[heapsize];
+    MPB *VMMainMPB = new MPB;
+    VMMainMPB->MPsize = heapsize; 
+    VMMainMPB->MPid = VM_MEMORY_POOL_ID_SYSTEM; //mem pool id is 1
+    VMMainMPB->base = base; //allocate for heapsize
+    VMMainMPB->spaceMap = new uint8_t[heapsize/64 + (heapsize % 64 > 0)]; //map creation
 
-        memPoolList.push_back(sharedMPB); //push sharedmemblock into poolList[0]
-        memPoolList.push_back(VMMainMPB); //push main into mem pool list[1]
+    memPoolList.push_back(sharedMPB); //push sharedmemblock into poolList[0]
+    memPoolList.push_back(VMMainMPB); //push main into mem pool list[1]
+    
+    //FAT STUFF
+    MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
+    currentThread->threadState = VM_THREAD_STATE_WAITING;
+    Scheduler();
+    
+    FATfd = currentThread->fileResult;  // fileResult holds fd
 
-        //FAT 16 START
-        MachineFileOpen(mount, O_RDWR, 0644, FileCallBack, currentThread); //call to open fat file
-        currentThread->threadState = VM_THREAD_STATE_WAITING;
-        Scheduler();
-        FATfd = currentThread->fileResult; //set global fd
+    BPB->BPB = readSector(0);       // sector 0 has BPB
+    BPB->bytesPerSector = bytesToUnsigned(BPB->BPB, BPB_BytsPerSecOffset, BPB_BytsPerSec);
+    BPB->sectorsPerCluster = bytesToUnsigned(BPB->BPB, BPB_SecPerClusOffset, BPB_SecPerClus);
+    BPB->reservedSectorCount = bytesToUnsigned(BPB->BPB, BPB_RsvdSecCntOffset, BPB_RsvdSecCnt);
+    BPB->rootEntityCount = bytesToUnsigned(BPB->BPB, BPB_RootEntCntOffset, BPB_RootEntCnt);
+    BPB->totalSectors16 = bytesToUnsigned(BPB->BPB, BPB_TotSec16Offset, BPB_TotSec16);
+    BPB->FATSz16 = bytesToUnsigned(BPB->BPB, BPB_FATSz16Offset, BPB_FATSz16);
+    BPB->totalSectors32 = bytesToUnsigned(BPB->BPB, BPB_TotSec32Offset, BPB_TotSec32);
+    BPB->FATSz = BPB_NumFATS * BPB->FATSz16;
+    BPB->ROOTSz = BPB->rootEntityCount * ROOT_EntSz / 512; //handout said divide by 512
 
-        //BPB Sector
-        BPB->BPB = readSector(0);
-        BPB->bytesPerSector = bytesToUnsigned(BPB->BPB, BPB_BytsPerSecOffset, BPB_BytsPerSec);
-        BPB->sectorsPerCluster = bytesToUnsigned(BPB->BPB, BPB_SecPerClusOffset, BPB_SecPerClus);
-        BPB->reservedSectorCount = bytesToUnsigned(BPB->BPB, BPB_RsvdSecCntOffset, BPB_RsvdSecCnt);
-        BPB->rootEntityCount = bytesToUnsigned(BPB->BPB, BPB_RootEntCntOffset, BPB_RootEntCnt);
-        BPB->totalSectors16 = bytesToUnsigned(BPB->BPB, BPB_TotSec16Offset, BPB_TotSec16);
-        BPB->media = bytesToUnsigned(BPB->BPB, BPB_MediaOffset, BPB_Media);
-        BPB->FATSz16 = bytesToUnsigned(BPB->BPB, BPB_FATSz16Offset, BPB_FATSz16);
-        BPB->sectorsPerTrack = bytesToUnsigned(BPB->BPB, BPB_SecPerTrkOffset, BPB_SecPerTrk);
-        BPB->numberHeads = bytesToUnsigned(BPB->BPB, BPB_NumHeadsOffset, BPB_NumHeads);
-        BPB->hiddenSectors = bytesToUnsigned(BPB->BPB, BPB_HiddSecOffset, BPB_HiddSec);
-        BPB->totalSectors32 = bytesToUnsigned(BPB->BPB, BPB_TotSec32Offset, BPB_TotSec32);
-        
-        //The other variables
-        FirstRootSector = BPB->reservedSectorCount + (BPB_NumFATs * BPB->FATSz16);
-        RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
-        FirstDataSector = FirstRootSector + RootDirectorySectors;
-        ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
-        //dumpBPB();
+    FirstRootSector = BPB->reservedSectorCount + BPB_NumFATS * BPB->FATSz16;
+    RootDirectorySectors = (BPB->rootEntityCount * 32)/512;
+    FirstDataSector = FirstRootSector + RootDirectorySectors;
+    ClusterCount = (BPB->totalSectors32 - FirstDataSector)/BPB->sectorsPerCluster;
+    //dumpBPB();
 
-        //FAT Sector
-        for(uint32_t i = 0; i < BPB->FATSz16; ++i)
-        {
-            uint32_t sector = i + 1;
-            uint8_t *fatSector = readSector(sector); //convert to 2 byte
 
-            for(int j = 0; j < 256; j += 2)
-                FATTablesList.push_back(fatSector[j+1] << 8 | fatSector[j]); //store raw fat table
-        }
-        //dumpFAT();
+    // for all FAT sectors
+    for(uint32_t i = 0; i < BPB->FATSz16; ++i) {
+        uint32_t sector = i + 1;
+        uint8_t *fatSector = readSector(sector); // convert to 2 byte
 
-        //ROOT Sector
-        for(uint32_t i = 0; i < RootDirectorySectors; ++i)
-        {
-            uint32_t sector = i + FirstRootSector; //starts at
-
-            if(parseDirEnt(sector, &ROOT) == -1)
-                break;
-        }
-        //dumpROOT();
-
-        //END
-        VMMain(argc, argv); //call to vmmain
-        return VM_STATUS_SUCCESS;
+        for(int j = 0; j < 256; j += 2)
+            FATTable.push_back(fatSector[j+1] << 8 | fatSector[j]);           // store raw fat table
     }
+    //dumpFAT();
+
+
+    // for all root sectors
+    for(uint32_t i = 0; i < RootDirectorySectors; ++i) {
+        uint32_t sector = i + FirstRootSector;       // starts at
+
+        if(parseDirEnt(sector, &ROOT) == -1)
+            break;
+    }   
+    //dumpROOT();
+
+    VMMain(argc, argv); //call to vmmain
+
+    //DISMOUNT FILE******
+    //MachineFileClose(filedescriptor, FileCallBack, currentThread);
+    //currentThread->threadState = VM_THREAD_STATE_WAITING;
+    //Scheduler(); //now we schedule our threads
+
+    return VM_STATUS_SUCCESS;
 } //VMStart()
 
 //***************************************************************************//
@@ -698,82 +690,77 @@ TVMStatus VMStart(int tickms, TVMMemorySize heapsize, int machinetickms,
 
 TVMStatus VMDirectoryOpen(const char *dirname, int *dirdescriptor)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(dirname == NULL || dirdescriptor == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    if(strcmp(dirname, "/") == 0) //dir is root directory
-    {
+    if(strcmp(dirname, "/") == 0) {
         OpenDir *newDir = new OpenDir;
+
         newDir->entryList = ROOT;
         newDir->entryItr = newDir->entryList.begin();
-        newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3; //return dirdes must be > 3
+        newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3;        // return dirdes
+        
         openDirList.push_back(newDir);
 
-        MachineResumeSignals(&SigState);
+        MachineResumeSignals(&OldState); //resume signals
         return VM_STATUS_SUCCESS;
-    } 
+    } // if root directory
 
-    /*else //dir is something else
-    {
-        vector<DirEntry*>::iterator itr; //look through root directory for this directory
-        for(itr = ROOT.begin(); itr != ROOT.end(); ++itr)
-        {
-            if((*itr)->DIR_Name == (uint16_t*)dirname) //if name matches
-            {
-                OpenDir *newDir = new OpenDir;
-                newDir->entryList = ROOT;
-                newDir->entryItr = newDir->entryList.begin();
-                newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3;
-                openDirList.push_back(newDir);
-
-                MachineResumeSignals(&SigState);
-                return VM_STATUS_SUCCESS;
-            }
+    /*
+    // look through root directory for this directory.
+        for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr) {
+                cerr << "location: " << hex << (*itr)->DIR_FstClusLO << endl;
         }
-    }*/
+    
+        DirEntry *newDir = new DirEntry;
+        newDir->dirDescriptor = *dirdescriptor = openDirList.size() + 3;        // return dirdes
+        newDir->pos = 0;
 
-    MachineResumeSignals(&SigState);
+        openDirList.push_back(newDir);
+
+    //if failure VM_STATUS_FAILURE
+    */
+
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMDirectoryOpen()
 
 TVMStatus VMDirectoryClose(int dirdescriptor)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
-    vector<OpenDir*>::iterator itr; //search for dirdescriptor in order to delete it
-    for(itr = openDirList.begin(); itr != openDirList.end(); ++itr)
-    {
-        if((*itr)->dirDescriptor == dirdescriptor)
-        {
+    // search for dirdescriptor
+    for(vector<OpenDir*>::iterator itr = openDirList.begin(); itr != openDirList.end(); ++itr){
+        if((*itr)->dirDescriptor == dirdescriptor) {
             openDirList.erase(itr);
-            return VM_STATUS_SUCCESS; //we found it and removed it
+            return VM_STATUS_SUCCESS;
         }
     }
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_FAILURE;
 } //VMDirectoryClose()
 
 TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(dirent == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    //ignore dirdescriptor for now, just do root
-
-    OpenDir *currDir = NULL;
-    for(vector<OpenDir*>::iterator itr = openDirList.begin(); itr != openDirList.end(); ++itr) 
-    {
-        if((*itr)->dirDescriptor == dirdescriptor)
-        {
+    
+    OpenDir *currDir = NULL;    //find dirdescriptor in open dir
+    for(vector<OpenDir*>::iterator itr = openDirList.begin(); itr != openDirList.end(); ++itr) {
+        if((*itr)->dirDescriptor == dirdescriptor) {
             currDir = *itr;
             break;
         }
-    } //loop to find dirdescriptor in open dir
+    }
 
     vector<DirEntry*>::iterator itr = currDir->entryItr;
     DirEntry* currDirEntry = *itr;
@@ -781,6 +768,7 @@ TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
     if(currDir->entryItr == currDir->entryList.end() || currDir == NULL)
         return VM_STATUS_FAILURE;
 
+    // output
     VMStringCopy(dirent->DLongFileName, (char*)currDirEntry->DLongFileName);
     VMStringCopy(dirent->DShortFileName, (char*)currDirEntry->DShortFileName);
     dirent->DSize = currDirEntry->DSize;
@@ -788,82 +776,61 @@ TVMStatus VMDirectoryRead(int dirdescriptor, SVMDirectoryEntryRef dirent)
     dirent->DCreate = currDirEntry->DCreate;
     dirent->DAccess = currDirEntry->DAccess;
     dirent->DModify = currDirEntry->DModify;
-    currDir->entryItr++; //keep track
 
-    MachineResumeSignals(&SigState);
+    currDir->entryItr++;        // keep track
+
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMDirectoryRead()
 
 TVMStatus VMDirectoryRewind(int dirdescriptor)
 {
-    MachineSuspendSignals(&SigState);
-
-    OpenDir *currDir = NULL;
-    for(vector<OpenDir*>::iterator itr = openDirList.begin(); itr != openDirList.end(); ++itr) 
-    {
-        if((*itr)->dirDescriptor == dirdescriptor)
-        {
-            currDir = *itr;
-            break;
-        }
-    } //loop to find dirdescriptor in open dir
-
-    if(currDir == NULL)
-        return VM_STATUS_FAILURE;
-
-    openDirList.push_back(currDir); //place dir ptr back to beginning of the dir
-    //cout << "rewinded" << endl;
-
-    MachineResumeSignals(&SigState);
-    return VM_STATUS_SUCCESS;
+    return 0;
 } //VMDirectoryRewind()
 
 TVMStatus VMDirectoryCurrent(char *abspath)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(abspath == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
     VMStringCopy(abspath, "/");
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMDirectoryCurrent()
 
 TVMStatus VMDirectoryChange(const char *path)
 {
-    MachineSuspendSignals(&SigState);
-
-    if(path == NULL)
-        return VM_STATUS_ERROR_INVALID_PARAMETER;
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     char abspath[64], curpath[64];
+
     VMDirectoryCurrent(curpath);
     VMFileSystemGetAbsolutePath(abspath, curpath, path);
 
-    if(strcmp(abspath, "/") != 0)
+    if(strcmp(abspath, "/") != 0){
         return VM_STATUS_FAILURE;
+    }
 
-    /* cd ., cd /, cd ./ must succeed*/
-
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMDirectoryChange()
 
-TVMStatus VMDirectoryCreate(const char *dirname) //EXTRA CREDIT
+TVMStatus VMDirectoryCreate(const char *dirname) //  EXTRA CREDIT
 {
-    MachineSuspendSignals(&SigState);
-    MachineResumeSignals(&SigState);
-    return VM_STATUS_SUCCESS;
-} //VMDirectoryCreate()
 
-TVMStatus VMDirectoryUnlink(const char *path) //EXTRA CREDIT
-{
-    MachineSuspendSignals(&SigState);
-    MachineResumeSignals(&SigState);
     return VM_STATUS_SUCCESS;
-} //VMDirectoryUnlink()
+} //VMDirectoryCreate
+
+TVMStatus VMDirectoryUnlink(const char *path) // EXTRA CREDIT
+{
+
+    return VM_STATUS_SUCCESS;
+} //VMDirectoryUnlink
 
 //***************************************************************************//
 //MemoryPool Functions
@@ -871,11 +838,13 @@ TVMStatus VMDirectoryUnlink(const char *path) //EXTRA CREDIT
 
 TVMStatus VMMemoryPoolCreate(void *base, TVMMemorySize size, TVMMemoryPoolIDRef memory)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(base == NULL || memory == NULL || size == 0) //invalid check
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
+  
     MPB *newMemPool = new MPB;
     newMemPool->base = (uint8_t*)base; // base gets mainMemPool base + offset
     newMemPool->MPid = *memory = memPoolList.size(); //gets next size in list val
@@ -883,13 +852,14 @@ TVMStatus VMMemoryPoolCreate(void *base, TVMMemorySize size, TVMMemoryPoolIDRef 
     newMemPool->spaceMap = new uint8_t[size/64];
     memPoolList.push_back(newMemPool); //push it into the list of mem pools
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMemoryPoolCreate()
 
 TVMStatus VMMemoryPoolDelete(TVMMemoryPoolID memory)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MPB *myMemPool = findMemoryPool(memory);
     if(myMemPool == NULL)
@@ -911,13 +881,14 @@ TVMStatus VMMemoryPoolDelete(TVMMemoryPoolID memory)
 
     memPoolList.erase(itr); //erase this from the memory pool
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMemoryPoolDelete()
 
 TVMStatus VMMemoryPoolQuery(TVMMemoryPoolID memory, TVMMemorySizeRef bytesleft)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MPB *myMemPool = findMemoryPool(memory);
 
@@ -934,13 +905,14 @@ TVMStatus VMMemoryPoolQuery(TVMMemoryPoolID memory, TVMMemorySizeRef bytesleft)
 
     *bytesleft = freeCount * 64; //return bytesleft
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMemoryPoolQuery()
 
 TVMStatus VMMemoryPoolAllocate(TVMMemoryPoolID memory, TVMMemorySize size, void **pointer)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MPB *myMemPool = findMemoryPool(memory);
     if(myMemPool == NULL || size == 0 || pointer == NULL) 
@@ -963,7 +935,7 @@ TVMStatus VMMemoryPoolAllocate(TVMMemoryPoolID memory, TVMMemorySize size, void 
                 }
 
                 *pointer = (uint8_t*)myMemPool->base + curr; //pointer now mapped to base plus offset
-                MachineResumeSignals(&SigState); //resume signals
+                MachineResumeSignals(&OldState); //resume signals
                 return VM_STATUS_SUCCESS; //we allocated so we are done
             }
             continue; //move on if not there yet
@@ -971,13 +943,14 @@ TVMStatus VMMemoryPoolAllocate(TVMMemoryPoolID memory, TVMMemorySize size, void 
         curr = 0; //reset so we can find the next slot
     } //going through our map to find open slots to allocate memory
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_ERROR_INSUFFICIENT_RESOURCES;
 } //VMMemoryPoolAllocate()
 
 TVMStatus VMMemoryPoolDeallocate(TVMMemoryPoolID memory, void *pointer)
 {
-    MachineSuspendSignals(&SigState);
+   TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signalsMPB *myMemPool = findMemoryPool(memory);
 
     MPB *myMemPool = findMemoryPool(memory);
     if(myMemPool == NULL || pointer == NULL) 
@@ -996,11 +969,11 @@ TVMStatus VMMemoryPoolDeallocate(TVMMemoryPoolID memory, void *pointer)
         }
 
         //if we went in here then the deallocation was a failure
-        MachineResumeSignals(&SigState); //resume signals
+        MachineResumeSignals(&OldState); //resume signals
         return VM_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMemoryPoolDeallocate()
 
@@ -1011,15 +984,15 @@ TVMStatus VMMemoryPoolDeallocate(TVMMemoryPoolID memory, void *pointer)
 TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsize, 
     TVMThreadPriority prio, TVMThreadIDRef tid)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(entry == NULL || tid == NULL) //invalid
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    //void *stack; //array of threads treated as a stack
-    //VMMemoryPoolAllocate(VM_MEMORY_POOL_ID_SYSTEM, (uint32_t)memsize, &stack); //allocate pool for thread
+    void *stack; //array of threads treated as a stack
+    VMMemoryPoolAllocate(VM_MEMORY_POOL_ID_SYSTEM, (uint32_t)memsize, &stack); //allocate pool for thread
 
-    uint8_t *stack = new uint8_t[memsize]; //array of threads treated as a stack
     TCB *newThread = new TCB; //start new thread
     newThread->threadEntry = entry;
     newThread->threadMemSize = memsize;
@@ -1029,13 +1002,14 @@ TVMStatus VMThreadCreate(TVMThreadEntry entry, void *param, TVMMemorySize memsiz
     newThread->threadID = *tid = threadList.size();
     threadList.push_back(newThread); //store new thread into next pos of list
     
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMThreadCreate()
 
 TVMStatus VMThreadDelete(TVMThreadID thread)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
     
     TCB *myThread = findThread(thread);
     if(myThread == NULL) //thread dne
@@ -1055,13 +1029,14 @@ TVMStatus VMThreadDelete(TVMThreadID thread)
 
     threadList.erase(itr); //now erase it
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMThreadDelete()
 
 TVMStatus VMThreadActivate(TVMThreadID thread)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     TCB *myThread = findThread(thread); //call to find the thread ptr
     if(myThread == NULL) //check if thread exists
@@ -1076,13 +1051,14 @@ TVMStatus VMThreadActivate(TVMThreadID thread)
     pushThread(myThread); //place thread into its proper place
     Scheduler(); //now we schedule the threads
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMThreadActivate()
 
 TVMStatus VMThreadTerminate(TVMThreadID thread)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     TCB *myThread = findThread(thread);
     if(myThread == NULL) //check if thread exists
@@ -1117,7 +1093,7 @@ TVMStatus VMThreadTerminate(TVMThreadID thread)
     removeFromMutex(myThread); //make sure not in any mutexs
     Scheduler(); //now we schedule
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMThreadTerminate()
 
@@ -1150,7 +1126,8 @@ TVMStatus VMThreadState(TVMThreadID thread, TVMThreadStateRef stateref)
 
 TVMStatus VMThreadSleep(TVMTick tick)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(tick == VM_TIMEOUT_INFINITE) //invalid
         return VM_STATUS_ERROR_INVALID_PARAMETER;
@@ -1161,7 +1138,7 @@ TVMStatus VMThreadSleep(TVMTick tick)
     sleepList.push_back(currentThread); //put cur thread into sleep list so sleep
     Scheduler(); //now we schedule
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS; //success sleep after reaches zero
 } //VMThreadSleep()
 
@@ -1171,7 +1148,8 @@ TVMStatus VMThreadSleep(TVMTick tick)
 
 TVMStatus VMMutexCreate(TVMMutexIDRef mutexref)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals 
 
     if(mutexref == NULL) //invalid
         return VM_STATUS_ERROR_INVALID_PARAMETER;
@@ -1181,13 +1159,14 @@ TVMStatus VMMutexCreate(TVMMutexIDRef mutexref)
     mutexList.push_back(newMutex); //push it into next pos
     *mutexref = newMutex->mutexID; //set to id
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState);
     return VM_STATUS_SUCCESS;
 } //VMMutexCreate()
 
 TVMStatus VMMutexDelete(TVMMutexID mutex)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MB *myMutex = findMutex(mutex);
     if(myMutex == NULL) //mutex does not exist
@@ -1204,13 +1183,14 @@ TVMStatus VMMutexDelete(TVMMutexID mutex)
 
     mutexList.erase(itr); //erase mutex from list
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMMutexDelete()
 
 TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(ownerref == NULL) //invalid
         return VM_STATUS_ERROR_INVALID_PARAMETER;
@@ -1224,13 +1204,14 @@ TVMStatus VMMutexQuery(TVMMutexID mutex, TVMThreadIDRef ownerref)
 
     *ownerref = myMutex->ownerThread->threadID; //set to owner ref from owner
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState);
     return VM_STATUS_SUCCESS;
 } //VMMutexQuery()
 
 TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MB *myMutex = findMutex(mutex);
     if(myMutex == NULL)
@@ -1255,13 +1236,14 @@ TVMStatus VMMutexAcquire(TVMMutexID mutex, TVMTick timeout)
 
     scheduleMutex(myMutex); //now we schedule mutexs
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState);
     return VM_STATUS_SUCCESS;
 } //VMMutexAcquire()
 
 TVMStatus VMMutexRelease(TVMMutexID mutex)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MB *myMutex = findMutex(mutex);
     if(myMutex == NULL)
@@ -1272,7 +1254,7 @@ TVMStatus VMMutexRelease(TVMMutexID mutex)
     myMutex->ownerThread = NULL; //release the owner id
     scheduleMutex(myMutex); //now we schedule mutex
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState);
     return VM_STATUS_SUCCESS;
 } //VMMutexRelease()
 
@@ -1282,121 +1264,102 @@ TVMStatus VMMutexRelease(TVMMutexID mutex)
 
 TVMStatus VMFileOpen(const char *filename, int flags, int mode, int *filedescriptor)
 {
-    MachineSuspendSignals(&SigState);
-
-    //If you're not doing extra credit, you only need to search through your root directory. 
-    //If the requested file can't be found in the root directory, you return VM_STATUS_FAILURE.
-    /*
-    use getabspath(abs, cur, path);
-    check if exists using getfilename/getdirname
-    find if exists caseinsensitive
-        check if mode == o_create  
-    open allcaps
-    get firstdatacluster/size
-    filepointer is offset within the file
-    vector hold open file information
-    currsize (might be updated later)
-    add to openfilevector, filedescriptor
-    */
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(filename == NULL || filedescriptor == NULL)
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
     char absPath[64], currPath[64], fileN[64];
-    VMDirectoryCurrent(currPath); //should be root '/'
-    VMFileSystemGetAbsolutePath(absPath, currPath, filename); //if filename is like /blah/yada
+    VMDirectoryCurrent(currPath);                                   // should be root '/'
+    VMFileSystemGetAbsolutePath(absPath, currPath, filename);       // if filename is like /blah/yada
     
-    if(strrchr(absPath, '/') - absPath != 0) //checks if more than one '/'
+    if(strrchr(absPath, '/') - absPath != 0)      // checks if more than one /
         return VM_STATUS_FAILURE;
 
     VMFileSystemFileFromFullPath(fileN, absPath);
-    toUpper(fileN); //make case insensitive or to uppercase if necessary
+    toUpper(fileN); // make case insensitive
 
-    if(VMStringLength(fileN) > 11) //fail if long name
+    if(VMStringLength(fileN) > 11)              // fail if long name
         return VM_STATUS_FAILURE;
 
-    char padding[13]; //padding in case we need to fill spaces so it can read fine
+    char padding[13];
     VMStringCopyN(padding, "              ", 11 - VMStringLength(fileN));
     VMStringConcatenate(fileN, padding);
     //cerr << "looking for file " << fileN << " in " << "/" << endl;
-    
+
     DirEntry *newFile = NULL;
-    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr) //go look for file
-    {
-        if(strcmp((char*)(*itr)->DShortFileName, fileN) == 0)
-        {
+    for(vector<DirEntry*>::iterator itr = ROOT.begin(); itr != ROOT.end(); ++itr){
+        if(strcmp((char*)(*itr)->DShortFileName, fileN) == 0) {
             newFile = (*itr);
             //cerr << fileN << " found!" << endl;
             break;
         }
     }
 
-    if(newFile == NULL) //file dne so we must create one
-    {
+
+    if(newFile == NULL) { 
         //cerr << "not found" << endl;
-        if((flags & O_CREAT) == O_CREAT)
-        {
+        if((flags & O_CREAT) == O_CREAT) {          // create if necessary
             //cerr << "creating" << endl;
             MachineFileOpen(filename, flags, mode, FileCallBack, currentThread);
-            currentThread->threadState = VM_THREAD_STATE_WAITING;
-            Scheduler();
+            currentThread->threadState = VM_THREAD_STATE_WAITING; //set to wait
+            Scheduler(); //now we schedule threads so that we can let other threads work
 
             if(currentThread->fileResult < 0) //check for failure
                 return VM_STATUS_FAILURE;
-
+            
             newFile = new DirEntry;
-            VMStringCopy((char*)newFile->DShortFileName, fileN); //copy file contents into newfile
-            VMDateTime(&newFile->DCreate); //create the file with current date
 
-            unsigned int i = 0;
-            for(vector<uint16_t>::iterator itr = FATTablesList.begin(); itr != FATTablesList.end(); ++itr, i++)
-            {
-                if(*itr == 0) //keep looking until free space
-                {
-                    newFile->DIR_FstClusLO = i; //the newly created file goes here
-                    *itr = 0xFFFF; //new file here
+            VMStringCopy((char*)newFile->DShortFileName, fileN);
+            VMDateTime(&newFile->DCreate);
+
+            // search for an open cluster
+            int i = 0;
+            for(vector<uint16_t>::iterator itr = FATTable.begin(); itr != FATTable.end(); ++itr, ++i){
+                if((*itr) == 0) {
+                    *itr = 0xFFFF;
+                    newFile->DIR_FstClusLO = i;
+                    //cout << "fstClusLO: " << i << endl;
                     break;
-                }   
-            } //keep inc until we find the free slot to put new file in
+                }
+            } 
 
             ROOT.push_back(newFile);
-        } 
 
-        else if(flags != O_CREAT) //check O_CREAT, create
+        } else if(flags != O_CREAT)        // check O_CREAT, create
             return VM_STATUS_FAILURE;
     }
 
     if(newFile->DAttributes == ATTR_DIRECTORY)
         return VM_STATUS_FAILURE;
 
-    VMDateTime(&newFile->DAccess); //update access time
+
+    VMDateTime(&newFile->DAccess);  // set access time
     newFile->fd = *filedescriptor = openFileList.size() + 3;
     openFileList.push_back(newFile);
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMFileOpen()
 
 TVMStatus VMFileClose(int filedescriptor)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
-    //update the size in dir entry, access date, write date/time
     DirEntry *myFile = new DirEntry;
-    for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
-    {
-        if((*itr)->fd == filedescriptor)
-        {
-            //cout << "found the file!" << endl
+    for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr) {
+        if((*itr)->fd == (uint32_t)filedescriptor) {
             myFile = (*itr);
             break;
         }
     }
 
     VMDateTime(&myFile->DModify); //update date/time modified
-    //must do writing from loaded clusters here call MachineFileWrite
 
-    /*for(map<uint32_t,uint8_t*>::iterator itr = loadedClus.begin(); itr != loadedClus.end(); ++itr)
+    // for every modified cluster, write out
+    for(map<uint32_t, uint8_t*>::iterator itr = loadedClus.begin(); itr != loadedClus.end(); ++itr)
     {
         void *sharedBase;
         VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate
@@ -1405,37 +1368,42 @@ TVMStatus VMFileClose(int filedescriptor)
         MachineFileWrite(myFile->fd, sharedBase, 512, FileCallBack, currentThread);
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler(); //now we schedule our threads
-    } //loop thru to write all the data*/
+    } //loop thru to write all the data
 
     MachineFileClose(filedescriptor, FileCallBack, currentThread);
     currentThread->threadState = VM_THREAD_STATE_WAITING;
     Scheduler(); //now we schedule our threads
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMFileClose()
 
+
 TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(data == NULL || length == NULL) //invalid input
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    if(filedescriptor < 3)
+        
+    if(filedescriptor < 3) // IF FD < 3 DO OLD STUFF
     {
-        uint32_t read = 0; //to keep track of how much we have read
-        char *localData = new char[*length]; //local var to copy data to/from
-        void *sharedBase; //temp address to allocate memory
+            uint32_t read = 0; //to keep track of how much we have read
+            char *localData = new char[*length]; //local var to copy data to/from
+            void *sharedBase; //temp address to allocate memory
 
         if(*length > 512)
         {
             VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate with 512 bytes
-            for(uint32_t i = 0; i < *length/512; ++i)
+            for(uint32_t i = 0; i < (uint32_t)*length/512; ++i)
             {
                 MachineFileRead(filedescriptor, sharedBase, 512, FileCallBack, currentThread);
+
                 currentThread->threadState = VM_THREAD_STATE_WAITING;
                 Scheduler();
+
                 memcpy(&localData[i * 512], sharedBase, 512);
                 read += currentThread->fileResult;   
             } //while we still have 512 bytes we will then read
@@ -1445,190 +1413,196 @@ TVMStatus VMFileRead(int filedescriptor, void *data, int *length)
         //else length < 512 or we do the remaining bytes
         uint32_t remaining = *length - read; //for remainders of *length % 512
         VMMemoryPoolAllocate(0, remaining, &sharedBase);
+       
         MachineFileRead(filedescriptor, sharedBase, remaining, FileCallBack, currentThread);
         currentThread->threadState = VM_THREAD_STATE_WAITING;
         Scheduler();
+
         memcpy(&localData[read], sharedBase, remaining);
         read += currentThread->fileResult;
+        
         memcpy(data, localData, read);
+
         delete localData; //delete it once we are done using it
         VMMemoryPoolDeallocate(0, sharedBase);
         *length = read; //set length to what we have read
-    } //fd < 3 case
 
-    else //fd is >= 3 so need to do clustering
+        if(currentThread->fileResult < 0) //check for failure
+            return VM_STATUS_FAILURE;
+    } //if fd < 3
+
+    else //IF FD > 3 DO NEW STUFF WITH CLUSTERS
     {
+        // find existing opened file
         DirEntry *openFile = NULL;
-        for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
-        {
-            if((*itr)->fd == filedescriptor)
-            {
+        for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr) {
+            if((*itr)->fd == (uint32_t)filedescriptor) {
                 openFile = (*itr);
                 break;
             }
         }
 
+        if(openFile == NULL)        // fail if file doesnt exist
+            return VM_STATUS_FAILURE;
+
         int read = openFile->fdOffset; //offset will be -1 if EOF
-        uint32_t curCluster = openFile->DIR_FstClusLO + read;
-
-        if(read == -1)
+        if(read == -1) {
+            openFile->fdOffset = 0;
             return  VM_STATUS_FAILURE;
-
-        char *localData = new char[*length]; //local var to copy data to/from
-
-        if(*length > 1024) //working with 1024 bytes bc they are size clusters
-        {
-            for(uint32_t i = 0; i < *length/1024; ++i)
-            {
-                if(!loadedClus.count(curCluster)) //if not previously loaded, load in
-                    loadedClus[curCluster] = readCluster(curCluster);
-
-                memcpy(&localData[i * 1024], readCluster(curCluster++), 1024);
-                read += 1024;
-            } //while we still have 1024 bytes we will then read
         }
 
-        //else length < 1024 or we do the remaining bytes
+        uint32_t curCluster = openFile->DIR_FstClusLO + read;
+        char *localData = new char[*length]; //local var to copy data to/from
+        uint8_t *localClus = new uint8_t[*length];
+
+        if(*length > 1024) {    // if larger than a cluster
+            for(uint32_t i = 0; i < (uint32_t)*length/1024; ++i) {
+
+                if(loadedClus.count(curCluster))    // if previously loaded, use that
+                    localClus = loadedClus[curCluster];
+                else
+                    localClus = readCluster(curCluster);
+
+                memcpy(&localData[i * 1024], localClus, 1024);
+                curCluster++;
+                read += 1024;
+            }
+        }
         uint32_t remaining = *length - read;
 
-        if(!loadedClus.count(curCluster))    // if not previously loaded, load in
-            loadedClus[curCluster] = readCluster(curCluster); //inserts into map <clus pos, data>
-        
-        memcpy(&localData[read], readCluster(curCluster), remaining);
+        if(loadedClus.count(curCluster))    // if previously loaded, use that
+            localClus = loadedClus[curCluster];
+        else
+            localClus = readCluster(curCluster);
+        memcpy(&localData[read], localClus, remaining);
+        curCluster++;
         read += remaining;
         memcpy(data, localData, read);
+
         *length = read; //set length to what we have read
         
-        if(FATTablesList[curCluster] >= 0xFFF8)
-            openFile->fdOffset = -1; //EOF
+        if(FATTable[curCluster] >= 0xFFF8)
+            openFile->fdOffset = -1;        //EOF
         else
             openFile->fdOffset += read / 1024;
-    }
 
-    MachineResumeSignals(&SigState);
-    if(currentThread->fileResult < 0) //check for failure
-        return VM_STATUS_FAILURE;
+    } //if fd > 3
+
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMFileRead()
 
 TVMStatus VMFileWrite(int filedescriptor, void *data, int *length)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     if(data == NULL || length == NULL) //invalid input
         return VM_STATUS_ERROR_INVALID_PARAMETER;
 
-    uint32_t written = 0; //to keep track of how much we have written
-    char *localData = new char[*length]; //local var to copy data to/from
-    memcpy(localData, data, *length); //we cope first
-    void *sharedBase; //temp address to allocate memory
+    if(filedescriptor < 3) {
+            uint32_t written = 0; //to keep track of how much we have written
+            char *localData = new char[*length]; //local var to copy data to/from
+            memcpy(localData, data, *length); //we cope first
+            void *sharedBase; //temp address to allocate memory
 
-    if(filedescriptor < 3)
-    {
-        if(*length > 512)
-        {
-            VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate
-            for(uint32_t i = 0; i < *length/512; ++i)
+            if(*length > 512)
             {
-                memcpy(sharedBase, &localData[i * 512], 512);
-                MachineFileWrite(filedescriptor, sharedBase, 512, FileCallBack, currentThread);
-                currentThread->threadState = VM_THREAD_STATE_WAITING;
-                Scheduler();
+                VMMemoryPoolAllocate(0, 512, &sharedBase); //begin to allocate
+                for(uint32_t i = 0; i < (uint32_t)*length/512; ++i)
+                {
+                    memcpy(sharedBase, &localData[i * 512], 512);
+                    
+                    MachineFileWrite(filedescriptor, sharedBase, 512, FileCallBack, currentThread);
 
-                if(currentThread->fileResult < 0)
-                    return VM_STATUS_FAILURE;
+                    currentThread->threadState = VM_THREAD_STATE_WAITING;
+                    Scheduler();
 
-                written += currentThread->fileResult;
-            } //while we still have 512 bytes we will then write
-            VMMemoryPoolDeallocate(0, sharedBase); //deallocate this once we are done
-        }
+                    if(currentThread->fileResult < 0)
+                        return VM_STATUS_FAILURE;
 
-        //else length < 512 or we do the remaining bytes
-        uint32_t remaining = *length - written; //for remainders of *length % 512
-        VMMemoryPoolAllocate(0, remaining, &sharedBase);
-        memcpy(sharedBase, &localData[written], remaining);
-        MachineFileWrite(filedescriptor, sharedBase, remaining, FileCallBack, currentThread);
-        currentThread->threadState = VM_THREAD_STATE_WAITING;
-        Scheduler();
-
-        if(currentThread->fileResult < 0)
-            return VM_STATUS_FAILURE;
-
-        written += currentThread->fileResult;
-
-        delete localData; //delete this once we have written
-        VMMemoryPoolDeallocate(0, sharedBase);
-        *length = written; //set length to what we have written
-    } //fd < 3 case
-
-    else //fd >= 3 so must do clustering
-    {
-        DirEntry *openFile = NULL;
-        for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr)
-        {
-            if((*itr)->fd == filedescriptor)
-            {
-                openFile = (*itr);
-                break;
+                    written += currentThread->fileResult;
+                } //while we still have 512 bytes we will then write
+                VMMemoryPoolDeallocate(0, sharedBase); //deallocate this once we are done
             }
-        }
 
-        if(openFile == NULL) //fail if file doesnt exist
-            return VM_STATUS_FAILURE;
+            //else length < 512 or we do the remaining bytes
+            uint32_t remaining = *length - written; //for remainders of *length % 512
+            VMMemoryPoolAllocate(0, remaining, &sharedBase);
 
-        int written = openFile->fdOffset; //offset will be -1 if EOF
-        if(written == -1)
-        {
-            openFile->fdOffset = 0;
-            return  VM_STATUS_FAILURE;
-        }
+            memcpy(sharedBase, &localData[written], remaining);
 
-        uint32_t curCluster = openFile->DIR_FstClusLO + written;
-        char *localData = new char[*length]; //local var to copy data to/from
-        memcpy(localData, data, *length); //we copy first
-        //cout << "cluster: " << curCluster << endl;
+            MachineFileWrite(filedescriptor, sharedBase, remaining, FileCallBack, currentThread);
+            currentThread->threadState = VM_THREAD_STATE_WAITING;
+            Scheduler();
 
-        uint8_t *localClus = readCluster(curCluster);
-        //dumpCluster(localClus, 32);
+            if(currentThread->fileResult < 0)
+                return VM_STATUS_FAILURE;
 
-        if(*length > 1024)
-        {
-            for(uint32_t i = 0; i < *length/1024; ++i)
-            {
-                if(!loadedClus.count(curCluster)) //if not previously loaded, load in
-                    loadedClus[curCluster] = readCluster(curCluster);
+            written += currentThread->fileResult;
 
-                memcpy(&localClus[i * 1024], &localData[i * 1024], 1024);
-                written += 1024;
+            delete localData; //delete this once we have written
+            VMMemoryPoolDeallocate(0, sharedBase);
+            *length = written; //set length to what we have written
+    } //if fd < 3
+    else {
+            DirEntry *openFile = NULL;
+            for(vector<DirEntry*>::iterator itr = openFileList.begin(); itr != openFileList.end(); ++itr) {
+                if((*itr)->fd == (uint32_t)filedescriptor) {
+                    openFile = (*itr);
+                    break;
+                }
             }
-        }
 
-        uint32_t remaining = *length - written;
+            if(openFile == NULL)        // fail if file doesnt exist
+                return VM_STATUS_FAILURE;
 
-        if(!loadedClus.count(curCluster)) //if not previously loaded, load in
-            loadedClus[curCluster] = readCluster(curCluster); //inserts into map <clus pos, data>
+            int written = openFile->fdOffset; //offset will be -1 if EOF
+            if(written == -1) {
+                openFile->fdOffset = 0;
+                return  VM_STATUS_FAILURE;
+            }
 
-        memcpy(&localClus[written], &localData[written], remaining);
-        written += remaining;
-        //dumpCluster(localClus, 32);
-        *length = written; //set length to what we have written
-        openFile->fdOffset += written / 1024;
-    } //fd >= 3 case
+            uint32_t curCluster = openFile->DIR_FstClusLO + written;
+            char *localData = new char[*length]; //local var to copy data to/from
+            uint8_t *localClus = new uint8_t[*length];
 
-    MachineResumeSignals(&SigState);
+            memcpy(localData, data, *length); //we copy first
+
+            if(*length > 1024) {      // for every cluster
+                for(uint32_t i = 0; i < (uint32_t)*length/1024; ++i) {
+                    memcpy(&localClus[i * 1024], &localData[i * 1024], 1024);
+                    loadedClus[curCluster] = &localClus[i * 1024];
+                    written += 1024;
+                }
+            }
+            uint32_t remaining = *length - written;
+
+            memcpy(&localClus[written], &localData[written], remaining);
+            loadedClus[curCluster] = &localClus[written];
+            written += remaining;
+
+            *length = written; //set length to what we have written
+            openFile->fdOffset += written / 1024;
+    }
+
+    MachineResumeSignals(&OldState); //resume signals
     return VM_STATUS_SUCCESS;
 } //VMFileWrite() 
 
 TVMStatus VMFileSeek(int filedescriptor, int offset, int whence, int *newoffset)
 {
-    MachineSuspendSignals(&SigState);
+    TMachineSignalState OldState; //local variable to suspend signals
+    MachineSuspendSignals(&OldState); //suspend signals
 
     MachineFileSeek(filedescriptor, offset, whence, FileCallBack, currentThread);
+
     currentThread->threadState = VM_THREAD_STATE_WAITING;
     Scheduler();
+
     *newoffset = currentThread->fileResult; //set newoffset to file result
 
-    MachineResumeSignals(&SigState);
+    MachineResumeSignals(&OldState); //resume signals
     if(currentThread->fileResult < 0) //check for failure
         return VM_STATUS_FAILURE;
     return VM_STATUS_SUCCESS;
